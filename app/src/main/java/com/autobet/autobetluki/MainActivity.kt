@@ -6,7 +6,6 @@ import android.content.Context
 import android.content.Intent
 import android.media.projection.MediaProjectionManager
 import android.net.Uri
-import android.os.Build
 import android.os.Bundle
 import android.provider.Settings
 import android.util.Log
@@ -78,6 +77,19 @@ class MainActivity : ComponentActivity() {
         Log.d(TAG, "Stop service intent sent for TouchCoordinateService")
     }
 
+    private fun openAccessibilitySettings() {
+        Log.d(TAG, "Opening accessibility settings for auto click enablement")
+        val intent = Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS).apply {
+            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        }
+        startActivity(intent)
+        Toast.makeText(
+            this,
+            "Hãy bật 'AutobetLuki AutoClickService' trong danh sách dịch vụ trợ năng",
+            Toast.LENGTH_LONG
+        ).show()
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         Log.d(TAG, "onCreate")
@@ -103,6 +115,9 @@ class MainActivity : ComponentActivity() {
                 onStopShowCoordinatesClick = {
                     Log.d(TAG, "Stop Show Coordinates button pressed")
                     stopCoordinateService()
+                },
+                onOpenAccessibilitySettingsClick = {
+                    openAccessibilitySettings()
                 }
             )
         }
@@ -115,7 +130,8 @@ fun ConfigScreen(
     onStartClick: () -> Unit,
     onStopClick: () -> Unit,
     onStartShowCoordinatesClick: () -> Unit,
-    onStopShowCoordinatesClick: () -> Unit
+    onStopShowCoordinatesClick: () -> Unit,
+    onOpenAccessibilitySettingsClick: () -> Unit
 ) {
     val context = LocalContext.current
     val logTag = "ConfigScreen"
@@ -187,6 +203,15 @@ fun ConfigScreen(
                 ) {
                     Text("Stop Capture")
                 }
+            }
+
+            Button(
+                onClick = onOpenAccessibilitySettingsClick,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(56.dp)
+            ) {
+                Text("Bật Auto Click (Accessibility)")
             }
 
             Text(

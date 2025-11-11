@@ -1,12 +1,16 @@
 
 package com.autobet.autobetluki
 
+import android.accessibilityservice.AccessibilityService
+import android.accessibilityservice.GestureDescription
 import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.Service
 import android.content.Context
 import android.content.Intent
 import android.graphics.Bitmap
+import android.graphics.Path
+import android.graphics.Point
 import android.graphics.PixelFormat
 import android.graphics.Rect
 import android.hardware.display.DisplayManager
@@ -30,6 +34,7 @@ import okhttp3.MultipartBody
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
+import org.json.JSONObject
 import org.opencv.android.OpenCVLoader
 import org.opencv.android.Utils
 import org.opencv.core.Core
@@ -163,95 +168,74 @@ class ScreenCaptureService : Service() {
                 captureMutex.withLock {
                     captureAndUpload()
                 }
-                delay(1_000L) // Capture every 1 second
+                delay(15_000L) // Capture every 15 seconds
             }
             Log.i(TAG, "Capture loop has ended.")
         }
     }
 
-    private fun scanScreenForAllTemplates(bitmap: Bitmap) {
-        Log.i(TEMPLATE_SCAN_TAG, "--- Starting Screen Scan for All Templates (Grayscale) ---")
+    private fun findTemplateLocation(bitmap: Bitmap, templateName: String): Point? {
+        Log.d(TEMPLATE_SCAN_TAG, "Scanning for template: '$templateName'")
         val screenGray = Mat()
         Utils.bitmapToMat(bitmap, screenGray)
         Imgproc.cvtColor(screenGray, screenGray, Imgproc.COLOR_RGBA2GRAY)
 
-        val drawableFields = R.drawable::class.java.fields
-        var templatesFound = 0
-        var templatesProcessed = 0
-        val typedValue = TypedValue()
-
-        for (field in drawableFields) {
-            try {
-                val resId = field.getInt(null)
-                resources.getValue(resId, typedValue, true)
-                val resPath = typedValue.string.toString()
-                val resName = field.name
-
-                if (resName.startsWith("abc_") || resName.startsWith("ic_") || resName.endsWith("_background") || resName.endsWith("_foreground")) {
-                    continue
-                }
-
-                if (!resPath.endsWith(".jpg") && !resPath.endsWith(".jpeg") && !resPath.endsWith(".png")) {
-                    Log.d(TEMPLATE_SCAN_TAG, "Skipping non-image file: $resPath")
-                    continue
-                }
-
-                Log.d(TEMPLATE_SCAN_TAG, "Processing image: $resPath")
-                templatesProcessed++
-
-                var templateImage: Mat? = null
-                try {
-                    templateImage = Utils.loadResource(this, resId, Imgcodecs.IMREAD_GRAYSCALE)
-                    if (templateImage.empty()) {
-                        Log.w(TEMPLATE_SCAN_TAG, "Could not load resource as image: $resName")
-                        continue
-                    }
-
-                    var bestMatch: Core.MinMaxLocResult? = null
-                    var bestScale = 0.0
-
-                    for (scale in (20 downTo 17).map { it / 20.0 }) { // 100%, 95%, 90%, 85%
-                        val templateW = (templateImage.width() * scale).roundToInt()
-                        val templateH = (templateImage.height() * scale).roundToInt()
-
-                        if (templateW <= 0 || templateH <= 0 || templateW > screenGray.width() || templateH > screenGray.height()) continue
-
-                        val resizedTemplate = Mat()
-                        Imgproc.resize(templateImage, resizedTemplate, Size(templateW.toDouble(), templateH.toDouble()))
-
-                        val result = Mat()
-                        Imgproc.matchTemplate(screenGray, resizedTemplate, result, Imgproc.TM_CCOEFF_NORMED)
-                        val mmr = Core.minMaxLoc(result)
-
-                        if (bestMatch == null || mmr.maxVal > bestMatch.maxVal) {
-                            bestMatch = mmr
-                            bestScale = scale
-                        }
-                        resizedTemplate.release()
-                        result.release()
-                    }
-
-                    val bestSimilarity = bestMatch?.maxVal ?: 0.0
-                    if (bestSimilarity >= 0.75) {
-                        val logMessage = String.format("---> FOUND: '%s' with similarity: %.2f at scale: %d%%", resName, bestSimilarity, (bestScale * 100).roundToInt())
-                        Log.i(TEMPLATE_SCAN_TAG, logMessage)
-                        templatesFound++
-                    } else {
-                        val logMessage = String.format("     NOT FOUND: '%s'. Best similarity was %.2f", resName, bestSimilarity)
-                        Log.i(TEMPLATE_SCAN_TAG, logMessage)
-                    }
-
-                } catch (e: Exception) {
-                    Log.e(TEMPLATE_SCAN_TAG, "Error processing resource '$resName'.", e)
-                } finally {
-                    templateImage?.release()
-                }
-            } catch (e: Exception) {
-                // Ignore errors from R.drawable fields that are not resources
-            }
+        val resId = resources.getIdentifier(templateName, "drawable", packageName)
+        if (resId == 0) {
+            Log.e(TEMPLATE_SCAN_TAG, "Template resource not found: $templateName")
+            return null
         }
-        Log.i(TEMPLATE_SCAN_TAG, "--- Screen Scan Finished. Processed $templatesProcessed images. Found $templatesFound matches. ---")
-        screenGray.release()
+
+        var templateImage: Mat? = null
+        try {
+            templateImage = Utils.loadResource(this, resId, Imgcodecs.IMREAD_GRAYSCALE)
+            if (templateImage.empty()) {
+                Log.w(TEMPLATE_SCAN_TAG, "Could not load resource as image: $templateName")
+                return null
+            }
+
+            var bestMatch: Core.MinMaxLocResult? = null
+            var bestScale = 0.0
+
+            for (scale in (20 downTo 17).map { it / 20.0 }) { // 100%, 95%, 90%, 85%
+                val templateW = (templateImage.width() * scale).roundToInt()
+                val templateH = (templateImage.height() * scale).roundToInt()
+
+                if (templateW <= 0 || templateH <= 0 || templateW > screenGray.width() || templateH > screenGray.height()) continue
+
+                val resizedTemplate = Mat()
+                Imgproc.resize(templateImage, resizedTemplate, Size(templateW.toDouble(), templateH.toDouble()))
+
+                val result = Mat()
+                Imgproc.matchTemplate(screenGray, resizedTemplate, result, Imgproc.TM_CCOEFF_NORMED)
+                val mmr = Core.minMaxLoc(result)
+
+                if (bestMatch == null || mmr.maxVal > bestMatch.maxVal) {
+                    bestMatch = mmr
+                    bestScale = scale
+                }
+                resizedTemplate.release()
+                result.release()
+            }
+
+            val bestSimilarity = bestMatch?.maxVal ?: 0.0
+            if (bestSimilarity >= 0.75) {
+                val matchLoc = bestMatch!!.maxLoc
+                val clickX = (matchLoc.x + (templateImage.width() * bestScale) / 2).roundToInt()
+                val clickY = (matchLoc.y + (templateImage.height() * bestScale) / 2).roundToInt()
+                Log.i(TEMPLATE_SCAN_TAG, "---> FOUND '$templateName' at ($clickX, $clickY) with similarity ${String.format("%.2f", bestSimilarity)}")
+                return Point(clickX, clickY)
+            } else {
+                Log.i(TEMPLATE_SCAN_TAG, "     NOT FOUND: '$templateName'. Best similarity was ${String.format("%.2f", bestSimilarity)}")
+                return null
+            }
+        } catch (e: Exception) {
+            Log.e(TEMPLATE_SCAN_TAG, "Error processing resource '$templateName'.", e)
+            return null
+        } finally {
+            templateImage?.release()
+            screenGray.release()
+        }
     }
 
     private fun parseRectFromString(coords: String?): Rect? {
@@ -280,7 +264,7 @@ class ScreenCaptureService : Service() {
     private suspend fun captureAndUpload() {
         Log.d(TAG, "Attempting to acquire image...")
         val image = waitForImage() ?: run {
-            Log.w(TAG, "Failed to acquire image, skipping this cycle.")
+            Log.w(TAG, "No image available for capture, skipping this cycle.")
             return
         }
 
@@ -295,10 +279,6 @@ class ScreenCaptureService : Service() {
             }
             Log.i(TAG, "Screenshot captured successfully (${fullBitmap.width}x${fullBitmap.height}).")
 
-            // Perform template matching on the full screenshot
-            scanScreenForAllTemplates(fullBitmap)
-
-            // --- Existing upload logic --- 
             val prefs = getSharedPreferences("bet_config", Context.MODE_PRIVATE)
             val secondsRegionString = prefs.getString("secondsRegion", null)
             val betAmountRegionString = prefs.getString("betAmountRegion", null)
@@ -334,8 +314,9 @@ class ScreenCaptureService : Service() {
             try {
                 client.newCall(request).execute().use { response ->
                     val responseBody = response.body?.string()
-                    if (response.isSuccessful) {
-                        Log.i(TAG, "UPLOAD SUCCESS (code=${response.code}). Server Response: $responseBody")
+                    if (response.isSuccessful && responseBody != null) {
+                        Log.i(TAG, "UPLOAD SUCCESS (code=${response.code}).")
+                        handleServerResponse(responseBody, fullBitmap)
                     } else {
                         Log.e(TAG, "!!! UPLOAD FAILED (code=${response.code}). Server Response: $responseBody")
                     }
@@ -352,6 +333,28 @@ class ScreenCaptureService : Service() {
             betAmountBitmap?.recycle()
             image.close()
             Log.d(TAG, "All bitmaps and image are released.")
+        }
+    }
+
+    private fun handleServerResponse(responseBody: String, screenBitmap: Bitmap) {
+        try {
+            val json = JSONObject(responseBody)
+            val imageType = json.optString("image_type", "")
+            val seconds = json.optInt("seconds", -1)
+
+            Log.d(TAG, "Server response parsed: image_type='$imageType', seconds=$seconds")
+
+            if (imageType == "BETTING" && seconds in 25..59) {
+                Log.i(TAG, "CLICK CONDITION MET: image_type is BETTING and seconds ($seconds) is in range [25, 59].")
+                val historyLocation = findTemplateLocation(screenBitmap, "history")
+                if (historyLocation != null) {
+                    AutoClickService.requestClick(historyLocation.x, historyLocation.y)
+                } else {
+                    Log.w(TAG, "Click condition met, but 'history' template was not found on screen.")
+                }
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to parse or handle server response.", e)
         }
     }
 

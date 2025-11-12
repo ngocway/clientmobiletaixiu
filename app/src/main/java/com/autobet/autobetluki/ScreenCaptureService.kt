@@ -77,7 +77,9 @@ class ScreenCaptureService : Service() {
         private const val NOTIFICATION_ID = 1
         private const val TAG = "ScreenCaptureSvc"
         private const val TEMPLATE_SCAN_TAG = "TemplateScan"
-        private const val JPEG_QUALITY = 75
+        private const val JPEG_QUALITY = 60
+        private const val REGION_JPEG_QUALITY = 70
+        private const val MAX_UPLOAD_DIMENSION = 1280
     }
 
     override fun onBind(intent: Intent?): IBinder? = null
@@ -168,7 +170,7 @@ class ScreenCaptureService : Service() {
                 captureMutex.withLock {
                     captureAndUpload()
                 }
-                delay(15_000L) // Capture every 15 seconds
+                delay(10_000L) // Capture every 10 seconds
             }
             Log.i(TAG, "Capture loop has ended.")
         }
@@ -255,9 +257,26 @@ class ScreenCaptureService : Service() {
         }
     }
 
-    private fun Bitmap.toByteArray(): ByteArray {
+    private fun Bitmap.toCompressedByteArray(maxDimension: Int? = null, quality: Int = JPEG_QUALITY): ByteArray {
+        val targetBitmap = if (maxDimension != null) {
+            val largestSide = max(this.width, this.height)
+            if (largestSide > maxDimension) {
+                val scale = maxDimension.toFloat() / largestSide.toFloat()
+                val scaledWidth = (this.width * scale).roundToInt().coerceAtLeast(1)
+                val scaledHeight = (this.height * scale).roundToInt().coerceAtLeast(1)
+                Bitmap.createScaledBitmap(this, scaledWidth, scaledHeight, true)
+            } else {
+                this
+            }
+        } else {
+            this
+        }
+
         val stream = ByteArrayOutputStream()
-        this.compress(Bitmap.CompressFormat.JPEG, JPEG_QUALITY, stream)
+        targetBitmap.compress(Bitmap.CompressFormat.JPEG, quality, stream)
+        if (targetBitmap !== this) {
+            targetBitmap.recycle()
+        }
         return stream.toByteArray()
     }
 
@@ -289,9 +308,28 @@ class ScreenCaptureService : Service() {
             betAmountBitmap = betAmountRect?.let { rect -> fullBitmap.crop(rect) }
 
             val multipartBody = MultipartBody.Builder().setType(MultipartBody.FORM)
-            multipartBody.addFormDataPart("file", "screenshot.jpg", fullBitmap.toByteArray().toRequestBody("image/jpeg".toMediaTypeOrNull()))
-            secondsBitmap?.let { multipartBody.addFormDataPart("seconds_image", "seconds.jpg", it.toByteArray().toRequestBody("image/jpeg".toMediaTypeOrNull())) }
-            betAmountBitmap?.let { multipartBody.addFormDataPart("bet_amount_image", "bet_amount.jpg", it.toByteArray().toRequestBody("image/jpeg".toMediaTypeOrNull())) }
+            multipartBody.addFormDataPart(
+                "file",
+                "screenshot.jpg",
+                fullBitmap.toCompressedByteArray(MAX_UPLOAD_DIMENSION, JPEG_QUALITY)
+                    .toRequestBody("image/jpeg".toMediaTypeOrNull())
+            )
+            secondsBitmap?.let {
+                multipartBody.addFormDataPart(
+                    "seconds_image",
+                    "seconds.jpg",
+                    it.toCompressedByteArray(quality = REGION_JPEG_QUALITY)
+                        .toRequestBody("image/jpeg".toMediaTypeOrNull())
+                )
+            }
+            betAmountBitmap?.let {
+                multipartBody.addFormDataPart(
+                    "bet_amount_image",
+                    "bet_amount.jpg",
+                    it.toCompressedByteArray(quality = REGION_JPEG_QUALITY)
+                        .toRequestBody("image/jpeg".toMediaTypeOrNull())
+                )
+            }
             
             val deviceName = prefs.getString("deviceName", "")?.trim().orEmpty()
             val betOptionRaw = prefs.getString("betOption", "cược Tài")?.trim().orEmpty()
@@ -344,17 +382,65 @@ class ScreenCaptureService : Service() {
 
             Log.d(TAG, "Server response parsed: image_type='$imageType', seconds=$seconds")
 
-            if (imageType == "BETTING" && seconds in 25..59) {
-                Log.i(TAG, "CLICK CONDITION MET: image_type is BETTING and seconds ($seconds) is in range [25, 59].")
-                val historyLocation = findTemplateLocation(screenBitmap, "history")
-                if (historyLocation != null) {
-                    AutoClickService.requestClick(historyLocation.x, historyLocation.y)
-                } else {
-                    Log.w(TAG, "Click condition met, but 'history' template was not found on screen.")
+            when {
+                imageType == "BETTING" && seconds in 25..59 -> {
+                    Log.i(TAG, "CLICK CONDITION MET: image_type is BETTING and seconds ($seconds) is in range [25, 59].")
+                    val historyLocation = findTemplateLocation(screenBitmap, "history")
+                    if (historyLocation != null) {
+                        AutoClickService.requestClick(historyLocation.x, historyLocation.y)
+                    } else {
+                        Log.w(TAG, "Click condition met, but 'history' template was not found on screen.")
+                    }
+                }
+                imageType == "HISTORY" -> {
+                    Log.i(TAG, "HISTORY screen detected. Clicking fixed top-left position to close.")
+                    AutoClickService.requestClick(5, 5)
+                    scheduleHistoryFollowUpClicks()
                 }
             }
         } catch (e: Exception) {
             Log.e(TAG, "Failed to parse or handle server response.", e)
+        }
+    }
+
+    private fun scheduleHistoryFollowUpClicks() {
+        serviceScope.launch {
+            delay(1_500L)
+            val oneBitmap = captureSingleBitmap()
+            val oneLocation = oneBitmap?.let { findTemplateLocation(it, "one") }
+            oneBitmap?.recycle()
+            if (oneLocation != null) {
+                Log.i(TAG, "Found 'one' template at $oneLocation after history close. Clicking.")
+                AutoClickService.requestClick(oneLocation.x, oneLocation.y)
+            } else {
+                Log.w(TAG, "'one' template not found after history close.")
+            }
+
+            delay(1_000L)
+            val bettingBitmap = captureSingleBitmap()
+            val bettingLocation = bettingBitmap?.let { findTemplateLocation(it, "betting_button") }
+            bettingBitmap?.recycle()
+            if (bettingLocation != null) {
+                Log.i(TAG, "Found 'betting_button' template at $bettingLocation. Clicking.")
+                AutoClickService.requestClick(bettingLocation.x, bettingLocation.y)
+            } else {
+                Log.w(TAG, "'betting_button' template not found after 'one' click.")
+            }
+        }
+    }
+
+    private suspend fun captureSingleBitmap(): Bitmap? {
+        return captureMutex.withLock {
+            val image = waitForImage() ?: return@withLock null
+            try {
+                val bitmap = image.toBitmap()
+                if (bitmap == null) {
+                    Log.e(TAG, "Failed to convert follow-up Image to Bitmap.")
+                }
+                bitmap
+            } finally {
+                image.close()
+            }
         }
     }
 

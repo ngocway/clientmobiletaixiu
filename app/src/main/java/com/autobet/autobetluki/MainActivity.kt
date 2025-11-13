@@ -8,6 +8,7 @@ import android.media.projection.MediaProjectionManager
 import android.net.Uri
 import android.os.Bundle
 import android.provider.Settings
+import android.provider.Settings.Secure
 import android.util.Log
 import android.widget.Toast
 import androidx.activity.ComponentActivity
@@ -108,14 +109,6 @@ class MainActivity : ComponentActivity() {
                     startService(serviceIntent)
                     Log.d(TAG, "Stop service intent sent for ScreenCaptureService")
                 },
-                onStartShowCoordinatesClick = {
-                    Log.d(TAG, "Start Show Coordinates button pressed")
-                    checkAndRequestOverlayPermission()
-                },
-                onStopShowCoordinatesClick = {
-                    Log.d(TAG, "Stop Show Coordinates button pressed")
-                    stopCoordinateService()
-                },
                 onOpenAccessibilitySettingsClick = {
                     openAccessibilitySettings()
                 }
@@ -129,48 +122,35 @@ class MainActivity : ComponentActivity() {
 fun ConfigScreen(
     onStartClick: () -> Unit,
     onStopClick: () -> Unit,
-    onStartShowCoordinatesClick: () -> Unit,
-    onStopShowCoordinatesClick: () -> Unit,
     onOpenAccessibilitySettingsClick: () -> Unit
 ) {
     val context = LocalContext.current
     val logTag = "ConfigScreen"
     val sharedPref = remember { context.getSharedPreferences("bet_config", Context.MODE_PRIVATE) }
     
+    // Initialize device name: use saved value or get ANDROID_ID as default
     var deviceName by remember { 
-        mutableStateOf(sharedPref.getString("deviceName", "") ?: "") 
+        val savedDeviceName = sharedPref.getString("deviceName", "")?.trim()
+        mutableStateOf(
+            savedDeviceName?.takeIf { it.isNotEmpty() } 
+                ?: Secure.getString(context.contentResolver, Secure.ANDROID_ID).takeIf { it.isNotEmpty() }
+                ?: ""
+        )
     }
     
-    val betOptions = listOf("cược Tài", "cược Xỉu")
-    var selectedBetOption by remember { 
-        mutableStateOf(sharedPref.getString("betOption", "cược Tài") ?: "cược Tài") 
+    // Save ANDROID_ID as default device name on first install if not already set
+    LaunchedEffect(Unit) {
+        val savedDeviceName = sharedPref.getString("deviceName", "")?.trim()
+        if (savedDeviceName.isNullOrEmpty()) {
+            val androidId = Secure.getString(context.contentResolver, Secure.ANDROID_ID)
+            if (androidId.isNotEmpty()) {
+                sharedPref.edit().putString("deviceName", androidId).apply()
+                deviceName = androidId
+                Log.d(logTag, "Set default device name to ANDROID_ID: $androidId")
+            }
+        }
     }
-    var expanded by remember { mutableStateOf(false) }
     
-    var openHistoryCoord by remember { 
-        mutableStateOf(sharedPref.getString("openHistoryCoord", "") ?: "") 
-    }
-    var closeHistoryCoord by remember { 
-        mutableStateOf(sharedPref.getString("closeHistoryCoord", "") ?: "") 
-    }
-    var startBetTaiCoord by remember { 
-        mutableStateOf(sharedPref.getString("startBetTaiCoord", "") ?: "") 
-    }
-    var startBetXiuCoord by remember { 
-        mutableStateOf(sharedPref.getString("startBetXiuCoord", "") ?: "") 
-    }
-    var bet1KButtonCoord by remember { 
-        mutableStateOf(sharedPref.getString("bet1KButtonCoord", "") ?: "") 
-    }
-    var startBetButtonCoord by remember { 
-        mutableStateOf(sharedPref.getString("startBetButtonCoord", "") ?: "") 
-    }
-    var secondsRegion by remember {
-        mutableStateOf(sharedPref.getString("secondsRegion", "") ?: "")
-    }
-    var betAmountRegion by remember {
-        mutableStateOf(sharedPref.getString("betAmountRegion", "") ?: "")
-    }
 
     Scaffold {
         Column(
@@ -215,7 +195,7 @@ fun ConfigScreen(
             }
 
             Text(
-                "Cấu hình cược",
+                "Cấu hình",
                 style = MaterialTheme.typography.headlineSmall,
                 modifier = Modifier.padding(top = 16.dp)
             )
@@ -226,128 +206,12 @@ fun ConfigScreen(
                 label = { Text("Device name") },
                 modifier = Modifier.fillMaxWidth()
             )
-            
-            ExposedDropdownMenuBox(
-                expanded = expanded,
-                onExpandedChange = { expanded = !expanded },
-                modifier = Modifier.fillMaxWidth()
-            ) {
-                OutlinedTextField(
-                    value = selectedBetOption,
-                    onValueChange = {},
-                    readOnly = true,
-                    label = { Text("Loại cược") },
-                    trailingIcon = { ExposedDropdownMenuDefaults.TrailingIcon(expanded = expanded) },
-                    modifier = Modifier
-                        .menuAnchor()
-                        .fillMaxWidth()
-                )
-                ExposedDropdownMenu(
-                    expanded = expanded,
-                    onDismissRequest = { expanded = false }
-                ) {
-                    betOptions.forEach { option ->
-                        DropdownMenuItem(
-                            text = { Text(option) },
-                            onClick = {
-                                selectedBetOption = option
-                                expanded = false
-                            }
-                        )
-                    }
-                }
-            }
-            
-            Text(
-                "Tọa độ các nút (format: x;y)",
-                style = MaterialTheme.typography.titleMedium,
-                modifier = Modifier.padding(top = 16.dp)
-            )
-            
-            OutlinedTextField(
-                value = openHistoryCoord,
-                onValueChange = { openHistoryCoord = it },
-                label = { Text("Mở lịch sử") },
-                placeholder = { Text("x;y") },
-                modifier = Modifier.fillMaxWidth()
-            )
-            
-            OutlinedTextField(
-                value = closeHistoryCoord,
-                onValueChange = { closeHistoryCoord = it },
-                label = { Text("Đóng lịch sử") },
-                placeholder = { Text("x;y") },
-                modifier = Modifier.fillMaxWidth()
-            )
-            
-            OutlinedTextField(
-                value = startBetTaiCoord,
-                onValueChange = { startBetTaiCoord = it },
-                label = { Text("Bắt đầu cược Tài") },
-                placeholder = { Text("x;y") },
-                modifier = Modifier.fillMaxWidth()
-            )
-            
-            OutlinedTextField(
-                value = startBetXiuCoord,
-                onValueChange = { startBetXiuCoord = it },
-                label = { Text("Bắt đầu cược Xỉu") },
-                placeholder = { Text("x;y") },
-                modifier = Modifier.fillMaxWidth()
-            )
-            
-            OutlinedTextField(
-                value = bet1KButtonCoord,
-                onValueChange = { bet1KButtonCoord = it },
-                label = { Text("Nút cược 1K") },
-                placeholder = { Text("x;y") },
-                modifier = Modifier.fillMaxWidth()
-            )
-            
-            OutlinedTextField(
-                value = startBetButtonCoord,
-                onValueChange = { startBetButtonCoord = it },
-                label = { Text("Bắt đầu cược") },
-                placeholder = { Text("x;y") },
-                modifier = Modifier.fillMaxWidth()
-            )
-            
-            Text(
-                "Vùng nhận diện (format: x1:y1;x2:y2)",
-                style = MaterialTheme.typography.titleMedium,
-                modifier = Modifier.padding(top = 16.dp)
-            )
-
-            OutlinedTextField(
-                value = secondsRegion,
-                onValueChange = { secondsRegion = it },
-                label = { Text("Vùng giây") },
-                placeholder = { Text("x1:y1;x2:y2") },
-                modifier = Modifier.fillMaxWidth()
-            )
-
-            OutlinedTextField(
-                value = betAmountRegion,
-                onValueChange = { betAmountRegion = it },
-                label = { Text("Vùng tiền cược") },
-                placeholder = { Text("x1:y1;x2:y2") },
-                modifier = Modifier.fillMaxWidth()
-            )
 
             Button(
                 onClick = {
                     Log.d(logTag, "Save button pressed")
                     with(sharedPref.edit()) {
                         putString("deviceName", deviceName)
-                        putString("betOption", selectedBetOption)
-                        putString("openHistoryCoord", openHistoryCoord)
-                        putString("closeHistoryCoord", closeHistoryCoord)
-                        putString("startBetTaiCoord", startBetTaiCoord)
-                        putString("startBetXiuCoord", startBetXiuCoord)
-                        putString("bet1KButtonCoord", bet1KButtonCoord)
-                        putString("startBetButtonCoord", startBetButtonCoord)
-                        putString("secondsRegion", secondsRegion)
-                        putString("betAmountRegion", betAmountRegion)
                         apply()
                     }
                     Toast.makeText(context, "Đã lưu cấu hình", Toast.LENGTH_SHORT).show()
@@ -359,30 +223,6 @@ fun ConfigScreen(
                     .padding(top = 16.dp)
             ) {
                 Text("Save")
-            }
-
-            // Coordinate display buttons
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(top = 16.dp),
-                horizontalArrangement = Arrangement.spacedBy(12.dp)
-            ) {
-                Button(
-                    onClick = onStartShowCoordinatesClick,
-                    modifier = Modifier.weight(1f),
-                    colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.secondary)
-                ) {
-                    Text("Start Show Coords")
-                }
-
-                Button(
-                    onClick = onStopShowCoordinatesClick,
-                    modifier = Modifier.weight(1f),
-                    colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.error)
-                ) {
-                    Text("Stop Show Coords")
-                }
             }
         }
     }

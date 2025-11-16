@@ -557,8 +557,8 @@ class ScreenCaptureService : Service() {
                     if (seconds == null) {
                         Log.w(TAG, "Server response for BETTING did not include 'seconds'. Skipping history click.")
                         isProcessingResponse.set(false) // Reset flag when no action needed
-                    } else if (seconds in 35..59) {
-                        Log.i(TAG, "CLICK CONDITION MET: image_type is BETTING and seconds ($seconds) is in range [35, 59].")
+                    } else if (seconds in 33..59) {
+                        Log.i(TAG, "CLICK CONDITION MET: image_type is BETTING and seconds ($seconds) is in range [33, 59].")
                         val historyLocation = findTemplateLocation(screenBitmap, "history")
                         if (historyLocation != null) {
                             AutoClickService.requestClick(historyLocation.x, historyLocation.y)
@@ -568,7 +568,7 @@ class ScreenCaptureService : Service() {
                         }
                         isProcessingResponse.set(false) // Reset flag after click
                     } else {
-                        Log.d(TAG, "Seconds=$seconds outside [35, 59], skipping history click.")
+                        Log.d(TAG, "Seconds=$seconds outside [33, 59], skipping history click.")
                         isProcessingResponse.set(false) // Reset flag when no action needed
                     }
                 }
@@ -597,64 +597,71 @@ class ScreenCaptureService : Service() {
                         }
                         
                         // Handle win_loss = "unknown" based on tien_thang and column_5
-                        val column5 = json.optString("column_5", "")
+                        val column5 = json.optString("column_5", "").trim()
+                        Log.d(TAG, "Checking conditions: tien_thang=$tienThang, column_5='$column5'")
+                        
                         if (tienThang != 0.0 && column5 == "<noi dung cot thu 5>") {
                             // win_loss = "unknown" and tien_thang != 0 and column_5 = "<noi dung cot thu 5>": Skip all processing, wait for next JSON
-                            Log.i(TAG, "win_loss='unknown', tien_thang != 0, and column_5='<noi dung cot thu 5>'. Skipping all processing and waiting for next HISTORY JSON.")
+                            Log.i(TAG, "win_loss='unknown', tien_thang != 0 ($tienThang), and column_5='<noi dung cot thu 5>'. Skipping all processing and waiting for next HISTORY JSON.")
                             isProcessingResponse.set(false)
                             return
                         }
+                        
                         // If tien_thang == 0 or column_5 != "<noi dung cot thu 5>", continue to use saved JSON (handled below)
+                        // win_loss = "unknown" and tien_thang = 0: Use saved JSON
+                        Log.d(TAG, "Condition not met for skip. tien_thang=$tienThang, column_5='$column5'. Will use saved JSON if available.")
+                        val savedJson = loadLatestHistoryJson()
+                        if (savedJson != null) {
+                            Log.i(TAG, "win_loss is 'unknown' and tien_thang=$tienThang, using saved JSON with win_loss='${savedJson.optString("win_loss", "")}'")
+                            // Process with saved JSON
+                            val processedWinLoss = savedJson.optString("win_loss", "").lowercase()
+                            val shouldPerformFollowUp = processedWinLoss == "win" || processedWinLoss == "loss"
+                            
+                            if (shouldPerformFollowUp) {
+                                val betAmount = savedJson.optDouble("bet_amount", 0.0)
+                                val clickCount = when (processedWinLoss) {
+                                    "win" -> 1
+                                    "loss" -> ((betAmount * 2) / 1000.0).toInt().coerceAtLeast(0)
+                                    else -> 0
+                                }
+                                Log.i(TAG, "Processing saved JSON: win_loss='$processedWinLoss', bet_amount=$betAmount, clickCount=$clickCount")
+                                scheduleHistoryFollowUpClicks(clickCount)
+                            } else {
+                                Log.i(TAG, "Saved JSON win_loss '$processedWinLoss' not actionable; skipping follow-up clicks.")
+                                isProcessingResponse.set(false)
+                            }
+                        } else {
+                            Log.w(TAG, "win_loss is 'unknown', tien_thang=0, but no saved JSON found. Skipping follow-up clicks.")
+                            isProcessingResponse.set(false)
+                        }
+                        return // Exit early for win_loss = "unknown"
                     } else {
                         // Reset counter when win_loss is not "unknown"
                         if (consecutiveUnknownCount > 0) {
                             Log.i(TAG, "Received HISTORY JSON with win_loss='$winLoss'. Resetting consecutive unknown count from $consecutiveUnknownCount to 0.")
                             consecutiveUnknownCount = 0
                         }
-                    }
-                    
-                    // Determine which JSON to use for processing
-                    val jsonToProcess: JSONObject
-                    if (winLoss == "unknown") {
-                        // win_loss = "unknown" and tien_thang = 0: Use saved JSON
-                        val savedJson = loadLatestHistoryJson()
-                        if (savedJson != null) {
-                            Log.i(TAG, "win_loss is 'unknown' and tien_thang=0, using saved JSON with win_loss='${savedJson.optString("win_loss", "")}'")
-                            jsonToProcess = savedJson
-                        } else {
-                            Log.w(TAG, "win_loss is 'unknown', tien_thang=0, but no saved JSON found. Skipping follow-up clicks.")
-                            isProcessingResponse.set(false) // Reset flag when no follow-up needed
-                            return
-                        }
-                    } else {
+                        
                         // If win_loss is not unknown, save this JSON and use it
                         saveHistoryJson(json)
-                        jsonToProcess = json
+                        val processedWinLoss = winLoss
+                        val shouldPerformFollowUp = processedWinLoss == "win" || processedWinLoss == "loss"
+                        
+                        if (shouldPerformFollowUp) {
+                            val betAmount = json.optDouble("bet_amount", 0.0)
+                            val clickCount = when (processedWinLoss) {
+                                "win" -> 1
+                                "loss" -> ((betAmount * 2) / 1000.0).toInt().coerceAtLeast(0)
+                                else -> 0
+                            }
+                            Log.i(TAG, "Processing JSON: win_loss='$processedWinLoss', bet_amount=$betAmount, clickCount=$clickCount")
+                            scheduleHistoryFollowUpClicks(clickCount)
+                        } else {
+                            Log.i(TAG, "win_loss '$processedWinLoss' not actionable; skipping follow-up clicks.")
+                            isProcessingResponse.set(false)
+                        }
+                        return // Exit early after processing
                     }
-                    
-                    val processedWinLoss = jsonToProcess.optString("win_loss", "").lowercase()
-                    val shouldPerformFollowUp = processedWinLoss == "win" || processedWinLoss == "loss"
-
-                    if (!shouldPerformFollowUp) {
-                        Log.i(TAG, "win_loss '$processedWinLoss' not actionable; skipping follow-up clicks.")
-                        isProcessingResponse.set(false) // Reset flag when no follow-up needed
-                        return
-                    }
-
-                    // Calculate click count based on win_loss and bet_amount from the JSON to process
-                    val betAmount = jsonToProcess.optDouble("bet_amount", 0.0)
-                    val clickCount = when (processedWinLoss) {
-                        "win" -> 1
-                        "loss" -> ((betAmount * 2) / 1000.0).toInt().coerceAtLeast(0)
-                        else -> 0
-                    }
-                    Log.i(TAG, "Calculated click count: $clickCount (win_loss='$processedWinLoss', bet_amount=$betAmount)")
-
-                    Log.i(
-                        TAG,
-                        "Scheduling follow-up clicks with win_loss='$processedWinLoss', bet_amount=$betAmount, clickCount=$clickCount"
-                    )
-                    scheduleHistoryFollowUpClicks(clickCount)
                 }
                 else -> {
                     isProcessingResponse.set(false) // Reset flag for unknown image types

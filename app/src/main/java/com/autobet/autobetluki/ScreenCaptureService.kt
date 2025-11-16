@@ -579,11 +579,12 @@ class ScreenCaptureService : Service() {
 
                     val winLossRaw = json.optString("win_loss", "")
                     val winLoss = winLossRaw.lowercase()
+                    val tienThang = json.optDouble("tien_thang", 0.0)
                     
                     // Track consecutive "unknown" win_loss values
                     if (winLoss == "unknown") {
                         consecutiveUnknownCount++
-                        Log.w(TAG, "Received HISTORY JSON with win_loss='unknown'. Consecutive count: $consecutiveUnknownCount/5")
+                        Log.w(TAG, "Received HISTORY JSON with win_loss='unknown', tien_thang=$tienThang. Consecutive count: $consecutiveUnknownCount/5")
                         
                         // If 5 consecutive "unknown" values, stop capture job
                         if (consecutiveUnknownCount >= 5) {
@@ -594,6 +595,16 @@ class ScreenCaptureService : Service() {
                             isProcessingResponse.set(false)
                             return
                         }
+                        
+                        // Handle win_loss = "unknown" based on tien_thang and column_5
+                        val column5 = json.optString("column_5", "")
+                        if (tienThang != 0.0 && column5 == "<noi dung cot thu 5>") {
+                            // win_loss = "unknown" and tien_thang != 0 and column_5 = "<noi dung cot thu 5>": Skip all processing, wait for next JSON
+                            Log.i(TAG, "win_loss='unknown', tien_thang != 0, and column_5='<noi dung cot thu 5>'. Skipping all processing and waiting for next HISTORY JSON.")
+                            isProcessingResponse.set(false)
+                            return
+                        }
+                        // If tien_thang == 0 or column_5 != "<noi dung cot thu 5>", continue to use saved JSON (handled below)
                     } else {
                         // Reset counter when win_loss is not "unknown"
                         if (consecutiveUnknownCount > 0) {
@@ -605,13 +616,13 @@ class ScreenCaptureService : Service() {
                     // Determine which JSON to use for processing
                     val jsonToProcess: JSONObject
                     if (winLoss == "unknown") {
-                        // If win_loss is unknown, try to load the latest saved JSON
+                        // win_loss = "unknown" and tien_thang = 0: Use saved JSON
                         val savedJson = loadLatestHistoryJson()
                         if (savedJson != null) {
-                            Log.i(TAG, "win_loss is 'unknown', using saved JSON with win_loss='${savedJson.optString("win_loss", "")}'")
+                            Log.i(TAG, "win_loss is 'unknown' and tien_thang=0, using saved JSON with win_loss='${savedJson.optString("win_loss", "")}'")
                             jsonToProcess = savedJson
                         } else {
-                            Log.w(TAG, "win_loss is 'unknown' and no saved JSON found. Skipping follow-up clicks.")
+                            Log.w(TAG, "win_loss is 'unknown', tien_thang=0, but no saved JSON found. Skipping follow-up clicks.")
                             isProcessingResponse.set(false) // Reset flag when no follow-up needed
                             return
                         }
@@ -954,27 +965,27 @@ class ScreenCaptureService : Service() {
     }
     
     /**
-     * Click "Đặt Cược" button using template matching for betting_button
+     * Click "Đặt Cược" button using coordinates from JSON Betting (button_place_bet_coords)
      */
     private suspend fun clickPlaceBetButton() {
         delay(50L) // Small delay after amount clicks
         
-        Log.i(TAG, "Clicking 'Đặt Cược' button using template matching for 'betting_button'.")
-        val bettingBitmap = captureSingleBitmap()
-        val bettingLocation = bettingBitmap?.let { findTemplateLocation(it, "betting_button") }
-        bettingBitmap?.recycle()
+        val prefs = getSharedPreferences("bet_config", Context.MODE_PRIVATE)
+        val buttonPlaceBetX = prefs.getInt("button_place_bet_x", -1)
+        val buttonPlaceBetY = prefs.getInt("button_place_bet_y", -1)
         
-        if (bettingLocation != null) {
-            Log.i(TAG, "Found 'betting_button' template at $bettingLocation. Clicking 'Đặt Cược'.")
-            showClickOverlay(bettingLocation.x, bettingLocation.y)
-            AutoClickService.requestClick(bettingLocation.x, bettingLocation.y)
+        if (buttonPlaceBetX >= 0 && buttonPlaceBetY >= 0) {
+            Log.i(TAG, "Using 'Đặt Cược' button coordinates from SharedPreferences: ($buttonPlaceBetX, $buttonPlaceBetY)")
+            showClickOverlay(buttonPlaceBetX, buttonPlaceBetY)
+            AutoClickService.requestClick(buttonPlaceBetX, buttonPlaceBetY)
             delay(50L) // Small delay for click to register
             
             // Record successful betting_button click time for 20-second cooldown
             lastBettingButtonClickTime = System.currentTimeMillis()
             Log.i(TAG, "betting_button clicked successfully. Starting 20-second cooldown period.")
         } else {
-            Log.w(TAG, "'betting_button' template not found. Cannot click 'Đặt Cược'.")
+            Log.w(TAG, "'Đặt Cược' button coordinates not found in SharedPreferences. Cannot click 'Đặt Cược'.")
+            Log.w(TAG, "Please ensure JSON Betting with button_place_bet_coords has been received and saved.")
         }
     }
     

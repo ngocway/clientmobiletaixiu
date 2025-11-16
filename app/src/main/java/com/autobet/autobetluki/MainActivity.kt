@@ -207,6 +207,34 @@ fun ConfigScreen(
                 modifier = Modifier.fillMaxWidth()
             )
 
+            // Test button toggle
+            var testButtonEnabled by remember {
+                val savedValue = sharedPref.getBoolean("test_button_enabled", false)
+                mutableStateOf(savedValue)
+            }
+            
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(top = 16.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.SpaceBetween
+            ) {
+                Text(
+                    text = "Test button",
+                    style = MaterialTheme.typography.bodyLarge,
+                    modifier = Modifier.weight(1f)
+                )
+                Switch(
+                    checked = testButtonEnabled,
+                    onCheckedChange = { enabled ->
+                        testButtonEnabled = enabled
+                        sharedPref.edit().putBoolean("test_button_enabled", enabled).apply()
+                        Log.d(logTag, "Test button toggle changed to: $enabled")
+                    }
+                )
+            }
+
             Button(
                 onClick = {
                     Log.d(logTag, "Save button pressed")

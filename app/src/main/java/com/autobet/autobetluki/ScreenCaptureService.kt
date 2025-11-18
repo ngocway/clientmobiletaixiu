@@ -38,6 +38,7 @@ import kotlinx.coroutines.*
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import android.os.Looper
+import android.widget.Toast
 import okhttp3.MediaType.Companion.toMediaTypeOrNull
 import okhttp3.MultipartBody
 import okhttp3.OkHttpClient
@@ -202,10 +203,10 @@ class ScreenCaptureService : Service() {
                 // - Waiting for server response
                 // - Matching templates
                 // - Clicking buttons (Cược, 1K, 10K, 50K, Đặt Cược)
-                // - Within 20 seconds after successfully clicking betting_button
+                // - Within 35 seconds after successfully clicking betting_button
                 val currentTime = System.currentTimeMillis()
                 val timeSinceBettingClick = currentTime - lastBettingButtonClickTime
-                val isWithinBettingCooldown = lastBettingButtonClickTime > 0 && timeSinceBettingClick < 20_000L
+                val isWithinBettingCooldown = lastBettingButtonClickTime > 0 && timeSinceBettingClick < 35_000L
                 
                 if (!isProcessingResponse.get() && !isWithinBettingCooldown) {
                     Log.d(TAG, "-------------------- New Capture Cycle --------------------")
@@ -216,11 +217,11 @@ class ScreenCaptureService : Service() {
                     if (isProcessingResponse.get()) {
                         Log.d(TAG, "Skipping capture - currently processing (waiting response/template matching/clicking buttons)")
                     } else if (isWithinBettingCooldown) {
-                        val remainingSeconds = (20_000L - timeSinceBettingClick) / 1000
-                        Log.d(TAG, "Skipping capture - within 20s cooldown after betting_button click (${remainingSeconds}s remaining)")
+                        val remainingSeconds = (35_000L - timeSinceBettingClick) / 1000
+                        Log.d(TAG, "Skipping capture - within 35s cooldown after betting_button click (${remainingSeconds}s remaining)")
                     }
                 }
-                delay(7_000L) // Capture every 7 seconds
+                delay(3_000L) // Capture every 3 seconds
             }
             Log.i(TAG, "Capture loop has ended.")
         }
@@ -455,12 +456,12 @@ class ScreenCaptureService : Service() {
             betAmountBitmap = betAmountRect?.let { rect -> bitmap.crop(rect) }
 
             // Resize full screenshot based on screen width:
-            // > 2000 → 80%, <= 2000 → 100% (no scaling)
+            // > 2000 → 65%, <= 2000 → 75%
             originalFullBitmap = bitmap
             val screenWidth = bitmap.width
             val scaleFactor = when {
-                screenWidth > 2000 -> 0.8f
-                else -> 1.0f
+                screenWidth > 2000 -> 0.65f
+                else -> 0.75f
             }
             val resizedFullBitmap = bitmap.resize(scaleFactor)
             fullBitmap = resizedFullBitmap
@@ -592,12 +593,12 @@ class ScreenCaptureService : Service() {
 
                     val winLossRaw = json.optString("win_loss", "")
                     val winLoss = winLossRaw.lowercase()
-                    val tienThang = json.optDouble("tien_thang", 0.0)
+                    val returnValue = json.optDouble("return", 0.0)
                     
-                    // Track consecutive "unknown" win_loss values
+                    // Handle win_loss = "unknown"
                     if (winLoss == "unknown") {
                         consecutiveUnknownCount++
-                        Log.w(TAG, "Received HISTORY JSON with win_loss='unknown', tien_thang=$tienThang. Consecutive count: $consecutiveUnknownCount/5")
+                        Log.w(TAG, "Received HISTORY JSON with win_loss='unknown'. Consecutive count: $consecutiveUnknownCount/5")
                         
                         // If 5 consecutive "unknown" values, stop capture job
                         if (consecutiveUnknownCount >= 5) {
@@ -609,189 +610,177 @@ class ScreenCaptureService : Service() {
                             return
                         }
                         
-                        // Handle win_loss = "unknown" based on tien_thang and column_5
-                        val column5 = json.optString("column_5", "").trim()
-                        val winningsColor = json.opt("winnings_color")
-                        val isWinningsColorNull = winningsColor == null || winningsColor == org.json.JSONObject.NULL
-                        Log.d(TAG, "Checking conditions: tien_thang=$tienThang, column_5='$column5', winnings_color=$winningsColor")
+                        // win_loss = "unknown": Skip all processing, no clicks
+                        Log.i(TAG, "win_loss='unknown'. Skipping all processing (no clicks, no calculations).")
+                        isProcessingResponse.set(false)
+                        return
+                    }
+                    
+                    // Reset counter when win_loss is not "unknown"
+                    if (consecutiveUnknownCount > 0) {
+                        Log.i(TAG, "Received HISTORY JSON with win_loss='$winLoss'. Resetting consecutive unknown count from $consecutiveUnknownCount to 0.")
+                        consecutiveUnknownCount = 0
+                    }
+                    
+                    // win_loss is not "unknown" (win or loss)
+                    val processedWinLoss = winLoss
+                    val shouldPerformFollowUp = processedWinLoss == "win" || processedWinLoss == "loss"
+                    
+                    if (!shouldPerformFollowUp) {
+                        Log.i(TAG, "win_loss '$processedWinLoss' not actionable; skipping follow-up clicks.")
+                        isProcessingResponse.set(false)
+                        return
+                    }
+                    
+                    // Check return value to determine which JSON to use
+                    if (returnValue == 0.0) {
+                        // return = 0: Use current JSON to calculate clicks, then save it
+                        Log.i(TAG, "return=0. Using current JSON to calculate clicks.")
                         
-                        // Skip if win_loss="unknown" AND winnings_color=null AND column_5="unknown"
-                        if (isWinningsColorNull && column5.equals("unknown", ignoreCase = true)) {
-                            Log.i(TAG, "win_loss='unknown', winnings_color=null, and column_5='unknown'. Skipping all processing (no clicks).")
-                            isProcessingResponse.set(false)
-                            return
-                        }
-                        
-                        if (tienThang != 0.0 && column5.contains("noi dung", ignoreCase = true)) {
-                            // win_loss = "unknown" and tien_thang != 0 and column_5 contains "noi dung": Skip all processing, wait for next JSON
-                            Log.i(TAG, "win_loss='unknown', tien_thang != 0 ($tienThang), and column_5 contains 'noi dung'. Skipping all processing and waiting for next HISTORY JSON.")
-                            isProcessingResponse.set(false)
-                            return
-                        }
-                        
-                        // If tien_thang == 0 or column_5 does not contain "noi dung", continue to use saved JSON (handled below)
-                        // win_loss = "unknown" and tien_thang = 0: Use saved JSON
-                        Log.d(TAG, "Condition not met for skip. tien_thang=$tienThang, column_5='$column5'. Will use saved JSON if available.")
-                        val savedJson = loadLatestHistoryJson()
-                        if (savedJson != null) {
-                            Log.i(TAG, "win_loss is 'unknown' and tien_thang=$tienThang, using saved JSON with win_loss='${savedJson.optString("win_loss", "")}'")
-                            // Process with saved JSON
-                            val processedWinLoss = savedJson.optString("win_loss", "").lowercase()
-                            val shouldPerformFollowUp = processedWinLoss == "win" || processedWinLoss == "loss"
-                            
-                            if (shouldPerformFollowUp) {
-                                // Handle skip logic: if 4 consecutive losses, skip next 3 rounds
-                                if (processedWinLoss == "win") {
-                                    // Handle win
-                                    if (skipCount > 0) {
-                                        // Currently skipping rounds - results in skipped rounds are IGNORED
-                                        skipCount--
-                                        Log.i(TAG, "WIN detected (from saved JSON) but SKIPPING (skip count remaining: $skipCount). Result is IGNORED - not counted, skip continues.")
-                                        if (skipCount == 0) {
-                                            // Skip period completed - reset counter and start counting from scratch
-                                            Log.i(TAG, "Skip period completed. Resetting consecutive loss count from $consecutiveLossCount to 0. Will start counting from scratch.")
-                                            consecutiveLossCount = 0
-                                        }
-                                        isProcessingResponse.set(false)
-                                    } else {
-                                        // Not skipping, reset counters on win
-                                        if (consecutiveLossCount > 0) {
-                                            Log.i(TAG, "WIN detected (from saved JSON). Resetting consecutive loss count from $consecutiveLossCount to 0.")
-                                            consecutiveLossCount = 0
-                                        }
-                                        // Perform normal clicks for win
-                                        val betAmount = savedJson.optDouble("bet_amount", 0.0)
-                                        val clickCount = 1
-                                        Log.i(TAG, "Processing saved JSON: win_loss='$processedWinLoss', bet_amount=$betAmount, clickCount=$clickCount")
-                                        scheduleHistoryFollowUpClicks(clickCount)
-                                    }
-                                } else if (processedWinLoss == "loss") {
-                                    // Handle loss
-                                    if (skipCount > 0) {
-                                        // Currently skipping rounds - results in skipped rounds are IGNORED
-                                        skipCount--
-                                        Log.i(TAG, "LOSS detected (from saved JSON) but SKIPPING (skip count remaining: $skipCount). Result is IGNORED - not counted in consecutive loss count.")
-                                        if (skipCount == 0) {
-                                            // Skip period completed - reset counter and start counting from scratch
-                                            Log.i(TAG, "Skip period completed. Resetting consecutive loss count from $consecutiveLossCount to 0. Will start counting from scratch.")
-                                            consecutiveLossCount = 0
-                                        }
-                                        isProcessingResponse.set(false)
-                                    } else {
-                                        // Not skipping, check if we need to start skipping
-                                        consecutiveLossCount++
-                                        Log.i(TAG, "LOSS detected (from saved JSON). Consecutive loss count: $consecutiveLossCount/4")
-                                        
-                                        if (consecutiveLossCount >= 4) {
-                                            // After 4 consecutive losses, skip next 3 rounds
-                                            // But this round (the 4th loss) still needs to click normally
-                                            skipCount = 3
-                                            Log.w(TAG, "!!! 4 CONSECUTIVE LOSSES DETECTED (from saved JSON). Will skip next 3 rounds. Results in those 3 rounds will be IGNORED. Skip count set to $skipCount.")
-                                            // Still perform normal clicks for this 4th loss
-                                            val betAmount = savedJson.optDouble("bet_amount", 0.0)
-                                            val clickCount = ((betAmount * 2) / 1000.0).toInt().coerceAtLeast(0)
-                                            Log.i(TAG, "Processing saved JSON: win_loss='$processedWinLoss', bet_amount=$betAmount, clickCount=$clickCount")
-                                            scheduleHistoryFollowUpClicks(clickCount)
-                                        } else {
-                                            // Perform normal clicks for loss
-                                            val betAmount = savedJson.optDouble("bet_amount", 0.0)
-                                            val clickCount = ((betAmount * 2) / 1000.0).toInt().coerceAtLeast(0)
-                                            Log.i(TAG, "Processing saved JSON: win_loss='$processedWinLoss', bet_amount=$betAmount, clickCount=$clickCount")
-                                            scheduleHistoryFollowUpClicks(clickCount)
-                                        }
-                                    }
-                                } else {
-                                    Log.i(TAG, "Saved JSON win_loss '$processedWinLoss' not actionable; skipping follow-up clicks.")
-                                    isProcessingResponse.set(false)
+                        if (processedWinLoss == "win") {
+                            // Handle win
+                            if (skipCount > 0) {
+                                // Currently skipping rounds - results in skipped rounds are IGNORED
+                                skipCount--
+                                Log.i(TAG, "WIN detected but SKIPPING (skip count remaining: $skipCount). Result is IGNORED - not counted, skip continues.")
+                                if (skipCount == 0) {
+                                    // Skip period completed - reset counter and start counting from scratch
+                                    Log.i(TAG, "Skip period completed. Resetting consecutive loss count from $consecutiveLossCount to 0. Will start counting from scratch.")
+                                    consecutiveLossCount = 0
                                 }
+                                isProcessingResponse.set(false)
+                            } else {
+                                // Not skipping, reset counters on win
+                                if (consecutiveLossCount > 0) {
+                                    Log.i(TAG, "WIN detected. Resetting consecutive loss count from $consecutiveLossCount to 0.")
+                                    consecutiveLossCount = 0
+                                }
+                                // Perform normal clicks for win
+                                val betAmount = json.optDouble("bet_amount", 0.0)
+                                val clickCount = 1
+                                Log.i(TAG, "Processing JSON: win_loss='$processedWinLoss', bet_amount=$betAmount, clickCount=$clickCount")
+                                scheduleHistoryFollowUpClicks(clickCount)
                             }
-                        } else {
-                            Log.w(TAG, "win_loss is 'unknown', tien_thang=0, but no saved JSON found. Skipping follow-up clicks.")
-                            isProcessingResponse.set(false)
-                        }
-                        return // Exit early for win_loss = "unknown"
-                    } else {
-                        // Reset counter when win_loss is not "unknown"
-                        if (consecutiveUnknownCount > 0) {
-                            Log.i(TAG, "Received HISTORY JSON with win_loss='$winLoss'. Resetting consecutive unknown count from $consecutiveUnknownCount to 0.")
-                            consecutiveUnknownCount = 0
-                        }
-                        
-                        // If win_loss is not unknown, save this JSON and use it
-                        saveHistoryJson(json)
-                        val processedWinLoss = winLoss
-                        val shouldPerformFollowUp = processedWinLoss == "win" || processedWinLoss == "loss"
-                        
-                        if (shouldPerformFollowUp) {
-                            // Handle skip logic: if 4 consecutive losses, skip next 3 rounds
-                            if (processedWinLoss == "win") {
-                                // Handle win
-                                if (skipCount > 0) {
-                                    // Currently skipping rounds - results in skipped rounds are IGNORED
-                                    skipCount--
-                                    Log.i(TAG, "WIN detected but SKIPPING (skip count remaining: $skipCount). Result is IGNORED - not counted, skip continues.")
-                                    if (skipCount == 0) {
-                                        // Skip period completed - reset counter and start counting from scratch
-                                        Log.i(TAG, "Skip period completed. Resetting consecutive loss count from $consecutiveLossCount to 0. Will start counting from scratch.")
-                                        consecutiveLossCount = 0
-                                    }
-                                    isProcessingResponse.set(false)
-                                } else {
-                                    // Not skipping, reset counters on win
-                                    if (consecutiveLossCount > 0) {
-                                        Log.i(TAG, "WIN detected. Resetting consecutive loss count from $consecutiveLossCount to 0.")
-                                        consecutiveLossCount = 0
-                                    }
-                                    // Perform normal clicks for win
+                        } else if (processedWinLoss == "loss") {
+                            // Handle loss
+                            if (skipCount > 0) {
+                                // Currently skipping rounds - results in skipped rounds are IGNORED
+                                skipCount--
+                                Log.i(TAG, "LOSS detected but SKIPPING (skip count remaining: $skipCount). Result is IGNORED - not counted in consecutive loss count.")
+                                if (skipCount == 0) {
+                                    // Skip period completed - reset counter and start counting from scratch
+                                    Log.i(TAG, "Skip period completed. Resetting consecutive loss count from $consecutiveLossCount to 0. Will start counting from scratch.")
+                                    consecutiveLossCount = 0
+                                }
+                                isProcessingResponse.set(false)
+                            } else {
+                                // Not skipping, check if we need to start skipping
+                                consecutiveLossCount++
+                                Log.i(TAG, "LOSS detected. Consecutive loss count: $consecutiveLossCount/4")
+                                
+                                if (consecutiveLossCount >= 4) {
+                                    // After 4 consecutive losses, skip next 3 rounds
+                                    // But this round (the 4th loss) still needs to click normally
+                                    skipCount = 3
+                                    Log.w(TAG, "!!! 4 CONSECUTIVE LOSSES DETECTED. Will skip next 3 rounds. Results in those 3 rounds will be IGNORED. Skip count set to $skipCount.")
+                                    // Still perform normal clicks for this 4th loss
                                     val betAmount = json.optDouble("bet_amount", 0.0)
-                                    val clickCount = 1
+                                    val clickCount = ((betAmount * 2) / 1000.0).toInt().coerceAtLeast(0)
+                                    Log.i(TAG, "Processing JSON: win_loss='$processedWinLoss', bet_amount=$betAmount, clickCount=$clickCount")
+                                    scheduleHistoryFollowUpClicks(clickCount)
+                                } else {
+                                    // Perform normal clicks for loss
+                                    val betAmount = json.optDouble("bet_amount", 0.0)
+                                    val clickCount = ((betAmount * 2) / 1000.0).toInt().coerceAtLeast(0)
                                     Log.i(TAG, "Processing JSON: win_loss='$processedWinLoss', bet_amount=$betAmount, clickCount=$clickCount")
                                     scheduleHistoryFollowUpClicks(clickCount)
                                 }
-                            } else if (processedWinLoss == "loss") {
-                                // Handle loss
-                                if (skipCount > 0) {
-                                    // Currently skipping rounds - results in skipped rounds are IGNORED
-                                    skipCount--
-                                    Log.i(TAG, "LOSS detected but SKIPPING (skip count remaining: $skipCount). Result is IGNORED - not counted in consecutive loss count.")
-                                    if (skipCount == 0) {
-                                        // Skip period completed - reset counter and start counting from scratch
-                                        Log.i(TAG, "Skip period completed. Resetting consecutive loss count from $consecutiveLossCount to 0. Will start counting from scratch.")
-                                        consecutiveLossCount = 0
-                                    }
-                                    isProcessingResponse.set(false)
-                                } else {
-                                    // Not skipping, check if we need to start skipping
-                                    consecutiveLossCount++
-                                    Log.i(TAG, "LOSS detected. Consecutive loss count: $consecutiveLossCount/4")
-                                    
-                                    if (consecutiveLossCount >= 4) {
-                                        // After 4 consecutive losses, skip next 3 rounds
-                                        // But this round (the 4th loss) still needs to click normally
-                                        skipCount = 3
-                                        Log.w(TAG, "!!! 4 CONSECUTIVE LOSSES DETECTED. Will skip next 3 rounds. Results in those 3 rounds will be IGNORED. Skip count set to $skipCount.")
-                                        // Still perform normal clicks for this 4th loss
-                                        val betAmount = json.optDouble("bet_amount", 0.0)
-                                        val clickCount = ((betAmount * 2) / 1000.0).toInt().coerceAtLeast(0)
-                                        Log.i(TAG, "Processing JSON: win_loss='$processedWinLoss', bet_amount=$betAmount, clickCount=$clickCount")
-                                        scheduleHistoryFollowUpClicks(clickCount)
-                                    } else {
-                                        // Perform normal clicks for loss
-                                        val betAmount = json.optDouble("bet_amount", 0.0)
-                                        val clickCount = ((betAmount * 2) / 1000.0).toInt().coerceAtLeast(0)
-                                        Log.i(TAG, "Processing JSON: win_loss='$processedWinLoss', bet_amount=$betAmount, clickCount=$clickCount")
-                                        scheduleHistoryFollowUpClicks(clickCount)
-                                    }
+                            }
+                        }
+                        
+                        // Save current JSON after processing (only when return = 0)
+                        saveHistoryJson(json)
+                    } else {
+                        // return != 0: Use saved JSON to calculate clicks
+                        Log.i(TAG, "return=$returnValue (not 0). Using saved JSON to calculate clicks.")
+                        val savedJson = loadLatestHistoryJson()
+                        
+                        if (savedJson == null) {
+                            Log.w(TAG, "return != 0 but no saved JSON found. Skipping follow-up clicks.")
+                            // Show Toast notification on main thread
+                            Handler(Looper.getMainLooper()).post {
+                                Toast.makeText(this@ScreenCaptureService, "Không có json cũ", Toast.LENGTH_LONG).show()
+                            }
+                            isProcessingResponse.set(false)
+                            return
+                        }
+                        
+                        val savedWinLoss = savedJson.optString("win_loss", "").lowercase()
+                        Log.i(TAG, "Using saved JSON with win_loss='$savedWinLoss'")
+                        
+                        if (savedWinLoss == "win") {
+                            // Handle win from saved JSON
+                            if (skipCount > 0) {
+                                // Currently skipping rounds - results in skipped rounds are IGNORED
+                                skipCount--
+                                Log.i(TAG, "WIN detected (from saved JSON) but SKIPPING (skip count remaining: $skipCount). Result is IGNORED - not counted, skip continues.")
+                                if (skipCount == 0) {
+                                    // Skip period completed - reset counter and start counting from scratch
+                                    Log.i(TAG, "Skip period completed. Resetting consecutive loss count from $consecutiveLossCount to 0. Will start counting from scratch.")
+                                    consecutiveLossCount = 0
                                 }
-                            } else {
-                                Log.i(TAG, "win_loss '$processedWinLoss' not actionable; skipping follow-up clicks.")
                                 isProcessingResponse.set(false)
+                            } else {
+                                // Not skipping, reset counters on win
+                                if (consecutiveLossCount > 0) {
+                                    Log.i(TAG, "WIN detected (from saved JSON). Resetting consecutive loss count from $consecutiveLossCount to 0.")
+                                    consecutiveLossCount = 0
+                                }
+                                // Perform normal clicks for win
+                                val betAmount = savedJson.optDouble("bet_amount", 0.0)
+                                val clickCount = 1
+                                Log.i(TAG, "Processing saved JSON: win_loss='$savedWinLoss', bet_amount=$betAmount, clickCount=$clickCount")
+                                scheduleHistoryFollowUpClicks(clickCount)
+                            }
+                        } else if (savedWinLoss == "loss") {
+                            // Handle loss from saved JSON
+                            if (skipCount > 0) {
+                                // Currently skipping rounds - results in skipped rounds are IGNORED
+                                skipCount--
+                                Log.i(TAG, "LOSS detected (from saved JSON) but SKIPPING (skip count remaining: $skipCount). Result is IGNORED - not counted in consecutive loss count.")
+                                if (skipCount == 0) {
+                                    // Skip period completed - reset counter and start counting from scratch
+                                    Log.i(TAG, "Skip period completed. Resetting consecutive loss count from $consecutiveLossCount to 0. Will start counting from scratch.")
+                                    consecutiveLossCount = 0
+                                }
+                                isProcessingResponse.set(false)
+                            } else {
+                                // Not skipping, check if we need to start skipping
+                                consecutiveLossCount++
+                                Log.i(TAG, "LOSS detected (from saved JSON). Consecutive loss count: $consecutiveLossCount/4")
+                                
+                                if (consecutiveLossCount >= 4) {
+                                    // After 4 consecutive losses, skip next 3 rounds
+                                    // But this round (the 4th loss) still needs to click normally
+                                    skipCount = 3
+                                    Log.w(TAG, "!!! 4 CONSECUTIVE LOSSES DETECTED (from saved JSON). Will skip next 3 rounds. Results in those 3 rounds will be IGNORED. Skip count set to $skipCount.")
+                                    // Still perform normal clicks for this 4th loss
+                                    val betAmount = savedJson.optDouble("bet_amount", 0.0)
+                                    val clickCount = ((betAmount * 2) / 1000.0).toInt().coerceAtLeast(0)
+                                    Log.i(TAG, "Processing saved JSON: win_loss='$savedWinLoss', bet_amount=$betAmount, clickCount=$clickCount")
+                                    scheduleHistoryFollowUpClicks(clickCount)
+                                } else {
+                                    // Perform normal clicks for loss
+                                    val betAmount = savedJson.optDouble("bet_amount", 0.0)
+                                    val clickCount = ((betAmount * 2) / 1000.0).toInt().coerceAtLeast(0)
+                                    Log.i(TAG, "Processing saved JSON: win_loss='$savedWinLoss', bet_amount=$betAmount, clickCount=$clickCount")
+                                    scheduleHistoryFollowUpClicks(clickCount)
+                                }
                             }
                         } else {
-                            Log.i(TAG, "win_loss '$processedWinLoss' not actionable; skipping follow-up clicks.")
+                            Log.w(TAG, "Saved JSON win_loss '$savedWinLoss' not actionable; skipping follow-up clicks.")
                             isProcessingResponse.set(false)
                         }
-                        return // Exit early after processing
                     }
                 }
                 else -> {
@@ -1032,7 +1021,7 @@ class ScreenCaptureService : Service() {
                             showClickOverlay(button1kX, button1kY)
                             AutoClickService.requestClick(button1kX, button1kY)
                             if (clickCount > 1 && index < clickCount - 1) {
-                                delay(1000L) // Increased delay for cloud phone compatibility
+                                delay(300L) // Delay between clicks
                             }
                         }
                         
@@ -1110,12 +1099,12 @@ class ScreenCaptureService : Service() {
             AutoClickService.requestClick(buttonPlaceBetX, buttonPlaceBetY)
             delay(50L) // Small delay for click to register
             
-            // Record successful betting_button click time for 20-second cooldown
+            // Record successful betting_button click time for 35-second cooldown
             lastBettingButtonClickTime = System.currentTimeMillis()
             
             // Increment consecutive successful "Đặt Cược" clicks
             consecutivePlaceBetSuccessCount++
-            Log.i(TAG, "betting_button clicked successfully. Consecutive success count: $consecutivePlaceBetSuccessCount/20. Starting 20-second cooldown period.")
+            Log.i(TAG, "betting_button clicked successfully. Consecutive success count: $consecutivePlaceBetSuccessCount/20. Starting 35-second cooldown period.")
         } else {
             // Reset counter if coordinates not found (click failed)
             consecutivePlaceBetSuccessCount = 0

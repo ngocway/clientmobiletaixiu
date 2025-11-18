@@ -448,11 +448,18 @@ class ScreenCaptureService : Service() {
             secondsBitmap = secondsRect?.let { rect -> bitmap.crop(rect) }
             betAmountBitmap = betAmountRect?.let { rect -> bitmap.crop(rect) }
 
-            // Resize full screenshot to 50% before compression to reduce upload size
+            // Resize full screenshot based on screen width:
+            // > 2000 → 80%, <= 2000 → 100% (no scaling)
             originalFullBitmap = bitmap
-            val resizedFullBitmap = bitmap.resize(0.5f)
+            val screenWidth = bitmap.width
+            val scaleFactor = when {
+                screenWidth > 2000 -> 0.8f
+                else -> 1.0f
+            }
+            val resizedFullBitmap = bitmap.resize(scaleFactor)
             fullBitmap = resizedFullBitmap
-            Log.i(TAG, "Resized full screenshot to 50%: ${resizedFullBitmap.width}x${resizedFullBitmap.height}")
+            val scalePercent = (scaleFactor * 100).toInt()
+            Log.i(TAG, "Screen width: $screenWidth. Resized full screenshot to $scalePercent%: ${resizedFullBitmap.width}x${resizedFullBitmap.height}")
 
             val multipartBody = MultipartBody.Builder().setType(MultipartBody.FORM)
             multipartBody.addFormDataPart("file", "screenshot.jpg", resizedFullBitmap.toByteArray().toRequestBody("image/jpeg".toMediaTypeOrNull()))
@@ -598,16 +605,25 @@ class ScreenCaptureService : Service() {
                         
                         // Handle win_loss = "unknown" based on tien_thang and column_5
                         val column5 = json.optString("column_5", "").trim()
-                        Log.d(TAG, "Checking conditions: tien_thang=$tienThang, column_5='$column5'")
+                        val winningsColor = json.opt("winnings_color")
+                        val isWinningsColorNull = winningsColor == null || winningsColor == org.json.JSONObject.NULL
+                        Log.d(TAG, "Checking conditions: tien_thang=$tienThang, column_5='$column5', winnings_color=$winningsColor")
                         
-                        if (tienThang != 0.0 && column5 == "<noi dung cot thu 5>") {
-                            // win_loss = "unknown" and tien_thang != 0 and column_5 = "<noi dung cot thu 5>": Skip all processing, wait for next JSON
-                            Log.i(TAG, "win_loss='unknown', tien_thang != 0 ($tienThang), and column_5='<noi dung cot thu 5>'. Skipping all processing and waiting for next HISTORY JSON.")
+                        // Skip if win_loss="unknown" AND winnings_color=null AND column_5="unknown"
+                        if (isWinningsColorNull && column5.equals("unknown", ignoreCase = true)) {
+                            Log.i(TAG, "win_loss='unknown', winnings_color=null, and column_5='unknown'. Skipping all processing (no clicks).")
                             isProcessingResponse.set(false)
                             return
                         }
                         
-                        // If tien_thang == 0 or column_5 != "<noi dung cot thu 5>", continue to use saved JSON (handled below)
+                        if (tienThang != 0.0 && column5.contains("noi dung", ignoreCase = true)) {
+                            // win_loss = "unknown" and tien_thang != 0 and column_5 contains "noi dung": Skip all processing, wait for next JSON
+                            Log.i(TAG, "win_loss='unknown', tien_thang != 0 ($tienThang), and column_5 contains 'noi dung'. Skipping all processing and waiting for next HISTORY JSON.")
+                            isProcessingResponse.set(false)
+                            return
+                        }
+                        
+                        // If tien_thang == 0 or column_5 does not contain "noi dung", continue to use saved JSON (handled below)
                         // win_loss = "unknown" and tien_thang = 0: Use saved JSON
                         Log.d(TAG, "Condition not met for skip. tien_thang=$tienThang, column_5='$column5'. Will use saved JSON if available.")
                         val savedJson = loadLatestHistoryJson()
@@ -683,8 +699,8 @@ class ScreenCaptureService : Service() {
                     return@launch
                 }
                 
-                // If clickCount >= 15, use stored button coordinates instead of template matching
-                if (clickCount >= 15) {
+                // If clickCount >= 7, use stored button coordinates instead of template matching
+                if (clickCount >= 7) {
                     val prefs = getSharedPreferences("bet_config", Context.MODE_PRIVATE)
                     val buttonBetX = prefs.getInt("button_bet_x", -1)
                     val buttonBetY = prefs.getInt("button_bet_y", -1)
@@ -724,6 +740,9 @@ class ScreenCaptureService : Service() {
                                 Log.i(TAG, "Click count is $clickCount (> 249). Using 50K/10K/1K buttons.")
                                 Log.i(TAG, "Calculated clicks: 50K=$clicks50k times, 10K=$clicks10k times, 1K=$clicks1k times")
                                 
+                                // Show click information overlay
+                                showClickInfoOverlay(clickCount, clicks50k, clicks10k, clicks1k)
+                                
                                 // Step 2: Click 50K button the calculated number of times
                                 if (clicks50k > 0) {
                                     Log.i(TAG, "Step 2: Clicking 50K button $clicks50k time(s) at ($button50kX, $button50kY)")
@@ -732,7 +751,7 @@ class ScreenCaptureService : Service() {
                                         showClickOverlay(button50kX, button50kY)
                                         AutoClickService.requestClick(button50kX, button50kY)
                                         if (index < clicks50k - 1) {
-                                            delay((100..300).random().toLong())
+                                            delay(300L) // Delay between clicks
                                         }
                                     }
                                     delay(500L) // Small delay after 50K clicks
@@ -746,7 +765,7 @@ class ScreenCaptureService : Service() {
                                         showClickOverlay(button10kX, button10kY)
                                         AutoClickService.requestClick(button10kX, button10kY)
                                         if (index < clicks10k - 1) {
-                                            delay((100..300).random().toLong())
+                                            delay(300L) // Delay between clicks
                                         }
                                     }
                                     delay(500L) // Small delay after 10K clicks
@@ -760,7 +779,7 @@ class ScreenCaptureService : Service() {
                                         showClickOverlay(button1kX, button1kY)
                                         AutoClickService.requestClick(button1kX, button1kY)
                                         if (index < clicks1k - 1) {
-                                            delay((100..300).random().toLong())
+                                            delay(300L) // Delay between clicks
                                         }
                                     }
                                 }
@@ -784,7 +803,7 @@ class ScreenCaptureService : Service() {
                                         showClickOverlay(oneLocation.x, oneLocation.y)
                                         AutoClickService.requestClick(oneLocation.x, oneLocation.y)
                                         if (clickCount > 1 && index < clickCount - 1) {
-                                            delay((100..300).random().toLong())
+                                            delay(300L) // Delay between clicks
                                         }
                                     }
                                 } else {
@@ -795,7 +814,7 @@ class ScreenCaptureService : Service() {
                                 clickPlaceBetButton()
                             }
                         } else {
-                            // For 15 <= clickCount <= 249, use 10K/1K buttons
+                            // For 7 <= clickCount <= 249, use 10K/1K buttons
                             val button10kX = prefs.getInt("button_10k_x", -1)
                             val button10kY = prefs.getInt("button_10k_y", -1)
                             val button1kX = prefs.getInt("button_1k_x", -1)
@@ -809,8 +828,11 @@ class ScreenCaptureService : Service() {
                                 val clicks10k = clickCount / 10
                                 val clicks1k = clickCount % 10
                                 
-                                Log.i(TAG, "Click count is $clickCount (15-249). Using 10K/1K buttons.")
+                                Log.i(TAG, "Click count is $clickCount (7-249). Using 10K/1K buttons.")
                                 Log.i(TAG, "Calculated clicks: 10K=$clicks10k times, 1K=$clicks1k times")
+                                
+                                // Show click information overlay
+                                showClickInfoOverlay(clickCount, 0, clicks10k, clicks1k)
                                 
                                 // Step 2: Click 10K button the calculated number of times
                                 if (clicks10k > 0) {
@@ -820,7 +842,7 @@ class ScreenCaptureService : Service() {
                                         showClickOverlay(button10kX, button10kY)
                                         AutoClickService.requestClick(button10kX, button10kY)
                                         if (index < clicks10k - 1) {
-                                            delay((100..300).random().toLong())
+                                            delay(300L) // Delay between clicks
                                         }
                                     }
                                     delay(500L) // Small delay after 10K clicks
@@ -834,7 +856,7 @@ class ScreenCaptureService : Service() {
                                         showClickOverlay(button1kX, button1kY)
                                         AutoClickService.requestClick(button1kX, button1kY)
                                         if (index < clicks1k - 1) {
-                                            delay((100..300).random().toLong())
+                                            delay(300L) // Delay between clicks
                                         }
                                     }
                                 }
@@ -858,7 +880,7 @@ class ScreenCaptureService : Service() {
                                         showClickOverlay(oneLocation.x, oneLocation.y)
                                         AutoClickService.requestClick(oneLocation.x, oneLocation.y)
                                         if (clickCount > 1 && index < clickCount - 1) {
-                                            delay((100..300).random().toLong())
+                                            delay(300L) // Delay between clicks
                                         }
                                     }
                                 } else {
@@ -895,21 +917,25 @@ class ScreenCaptureService : Service() {
                         clickPlaceBetButton()
                     }
                 } else {
-                    // For clickCount < 15, use button_1k_coords from SharedPreferences
+                    // For clickCount < 7, use button_1k_coords from SharedPreferences
                     val prefs = getSharedPreferences("bet_config", Context.MODE_PRIVATE)
                     val button1kX = prefs.getInt("button_1k_x", -1)
                     val button1kY = prefs.getInt("button_1k_y", -1)
                     
                     if (button1kX >= 0 && button1kY >= 0) {
-                        Log.i(TAG, "Click count is $clickCount (< 15). Using 1K button coordinates from SharedPreferences.")
+                        Log.i(TAG, "Click count is $clickCount (< 7). Using 1K button coordinates from SharedPreferences.")
                         Log.i(TAG, "Clicking 1K button $clickCount time(s) at ($button1kX, $button1kY)")
+                        
+                        // Show click information overlay
+                        showClickInfoOverlay(clickCount, 0, 0, clickCount)
+                        
                         delay(500L) // Delay 0.5 seconds before clicking 1K button
                         
                         repeat(clickCount) { index ->
                             showClickOverlay(button1kX, button1kY)
                             AutoClickService.requestClick(button1kX, button1kY)
                             if (clickCount > 1 && index < clickCount - 1) {
-                                delay((100..300).random().toLong())
+                                delay(1000L) // Increased delay for cloud phone compatibility
                             }
                         }
                         
@@ -1263,6 +1289,90 @@ class ScreenCaptureService : Service() {
             
         } catch (e: Exception) {
             Log.e(TAG, "Failed to show click overlay at ($x, $y)", e)
+        }
+    }
+    
+    /**
+     * Show click information overlay (total clicks and breakdown by button)
+     * Must be called from main thread (UI thread)
+     */
+    private fun showClickInfoOverlay(totalClicks: Int, clicks50k: Int, clicks10k: Int, clicks1k: Int) {
+        // Check if SYSTEM_ALERT_WINDOW permission is granted
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+            if (!Settings.canDrawOverlays(this)) {
+                Log.w(TAG, "SYSTEM_ALERT_WINDOW permission not granted. Cannot show click info overlay")
+                return
+            }
+        }
+        
+        // Ensure we're on the main thread for UI operations
+        if (Looper.myLooper() == Looper.getMainLooper()) {
+            showClickInfoOverlayInternal(totalClicks, clicks50k, clicks10k, clicks1k)
+        } else {
+            Handler(Looper.getMainLooper()).post {
+                showClickInfoOverlayInternal(totalClicks, clicks50k, clicks10k, clicks1k)
+            }
+        }
+    }
+    
+    private fun showClickInfoOverlayInternal(totalClicks: Int, clicks50k: Int, clicks10k: Int, clicks1k: Int) {
+        try {
+            val windowManager = getSystemService(Context.WINDOW_SERVICE) as WindowManager
+            
+            // Create text view with click information
+            val textView = android.widget.TextView(this).apply {
+                val infoText = buildString {
+                    appendLine("Tổng số click: $totalClicks")
+                    if (clicks50k > 0) appendLine("50K: $clicks50k lần")
+                    if (clicks10k > 0) appendLine("10K: $clicks10k lần")
+                    if (clicks1k > 0) appendLine("1K: $clicks1k lần")
+                }
+                text = infoText.trim()
+                setTextColor(Color.WHITE)
+                setTextSize(TypedValue.COMPLEX_UNIT_SP, 16f)
+                setBackgroundColor(Color.parseColor("#CC2196F3")) // Blue background with transparency
+                setPadding(20, 15, 20, 15)
+                setTypeface(null, android.graphics.Typeface.BOLD)
+            }
+            
+            // Measure text to get proper size
+            textView.measure(
+                View.MeasureSpec.makeMeasureSpec(0, View.MeasureSpec.UNSPECIFIED),
+                View.MeasureSpec.makeMeasureSpec(0, View.MeasureSpec.UNSPECIFIED)
+            )
+            val width = textView.measuredWidth + 40 // Add padding
+            val height = textView.measuredHeight + 30 // Add padding
+            
+            val layoutParams = WindowManager.LayoutParams(
+                width,
+                height,
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                    WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY
+                } else {
+                    WindowManager.LayoutParams.TYPE_PHONE
+                },
+                WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
+                        WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE or
+                        WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN,
+                PixelFormat.TRANSLUCENT
+            ).apply {
+                gravity = Gravity.TOP or Gravity.CENTER_HORIZONTAL
+                x = 0
+                y = 100 // Position at top center, 100px from top
+            }
+            
+            windowManager.addView(textView, layoutParams)
+            clickOverlays.add(textView)
+            
+            Log.i(TAG, "Showing click info overlay: Total=$totalClicks, 50K=$clicks50k, 10K=$clicks10k, 1K=$clicks1k")
+            
+            // Remove overlay after 10 seconds
+            Handler(Looper.getMainLooper()).postDelayed({
+                removeClickOverlay(textView, windowManager)
+            }, 10_000L)
+            
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to show click info overlay", e)
         }
     }
     

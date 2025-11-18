@@ -31,17 +31,24 @@ class MainActivity : ComponentActivity() {
     }
 
     private val screenCaptureLauncher = registerForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
+        Log.d(TAG, "Screen capture permission result received: resultCode=${result.resultCode}")
         if (result.resultCode == Activity.RESULT_OK) {
             Log.d(TAG, "Permission granted for screen capture")
-            val serviceIntent = Intent(this, ScreenCaptureService::class.java).apply {
-                action = ScreenCaptureService.ACTION_START
-                putExtra(ScreenCaptureService.EXTRA_RESULT_CODE, result.resultCode)
-                putExtra(ScreenCaptureService.EXTRA_DATA, result.data)
+            try {
+                val serviceIntent = Intent(this, ScreenCaptureService::class.java).apply {
+                    action = ScreenCaptureService.ACTION_START
+                    putExtra(ScreenCaptureService.EXTRA_RESULT_CODE, result.resultCode)
+                    putExtra(ScreenCaptureService.EXTRA_DATA, result.data)
+                }
+                startForegroundService(serviceIntent)
+                Log.d(TAG, "startForegroundService invoked for ScreenCaptureService")
+            } catch (e: Exception) {
+                Log.e(TAG, "Exception when starting ScreenCaptureService", e)
+                Toast.makeText(this, "Lỗi khi khởi động service: ${e.message}", Toast.LENGTH_LONG).show()
             }
-            startForegroundService(serviceIntent)
-            Log.d(TAG, "startForegroundService invoked for ScreenCaptureService")
         } else {
-            Log.w(TAG, "Screen capture permission denied resultCode=${result.resultCode}")
+            Log.w(TAG, "Screen capture permission denied or cancelled. resultCode=${result.resultCode}")
+            Toast.makeText(this, "Quyền capture màn hình bị từ chối (resultCode=${result.resultCode})", Toast.LENGTH_LONG).show()
         }
     }
     
@@ -98,8 +105,20 @@ class MainActivity : ComponentActivity() {
             ConfigScreen(
                 onStartClick = {
                     Log.d(TAG, "Start Capture button pressed")
-                    val mediaProjectionManager = getSystemService(Context.MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
-                    screenCaptureLauncher.launch(mediaProjectionManager.createScreenCaptureIntent())
+                    try {
+                        val mediaProjectionManager = getSystemService(Context.MEDIA_PROJECTION_SERVICE) as? MediaProjectionManager
+                        if (mediaProjectionManager == null) {
+                            Log.e(TAG, "Failed to get MediaProjectionManager service")
+                            Toast.makeText(this, "Không thể truy cập MediaProjectionManager", Toast.LENGTH_LONG).show()
+                            return@ConfigScreen
+                        }
+                        val captureIntent = mediaProjectionManager.createScreenCaptureIntent()
+                        Log.d(TAG, "Created screen capture intent, launching...")
+                        screenCaptureLauncher.launch(captureIntent)
+                    } catch (e: Exception) {
+                        Log.e(TAG, "Exception when requesting screen capture permission", e)
+                        Toast.makeText(this, "Lỗi khi yêu cầu quyền capture: ${e.message}", Toast.LENGTH_LONG).show()
+                    }
                 },
                 onStopClick = {
                     Log.d(TAG, "Stop Capture button pressed")

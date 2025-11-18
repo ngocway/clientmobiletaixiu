@@ -1,0 +1,93 @@
+═══════════════════════════════════════════════════════════════
+HƯỚNG DẪN CÀI ĐẶT ỨNG DỤNG KHI BỊ GOOGLE PLAY PROTECT CHẶN
+═══════════════════════════════════════════════════════════════
+
+Ứng dụng của bạn sử dụng các quyền nhạy cảm (Accessibility Service, 
+Screen Capture, Overlay) nên Google Play Protect có thể cảnh báo.
+Đây là các cách để cài đặt ứng dụng trên máy của bạn:
+
+───────────────────────────────────────────────────────────────
+CÁCH 1: TẮT GOOGLE PLAY PROTECT TẠM THỜI (ĐƠN GIẢN NHẤT)
+───────────────────────────────────────────────────────────────
+
+1. Mở ứng dụng "Google Play Store"
+2. Vào menu (3 gạch ngang) → "Bảo vệ Play"
+3. Tắt "Quét ứng dụng bằng Play Protect"
+4. Cài đặt ứng dụng của bạn
+5. Sau khi cài xong, có thể bật lại Play Protect
+
+───────────────────────────────────────────────────────────────
+CÁCH 2: CÀI ĐẶT QUA ADB (KHÔNG CẦN TẮT PLAY PROTECT)
+───────────────────────────────────────────────────────────────
+
+1. Bật "Tùy chọn nhà phát triển" trên điện thoại:
+   - Vào Cài đặt → Giới thiệu về điện thoại
+   - Nhấn 7 lần vào "Số bản dựng"
+
+2. Bật "USB Debugging":
+   - Vào Cài đặt → Tùy chọn nhà phát triển
+   - Bật "USB debugging"
+
+3. Kết nối điện thoại với máy tính qua USB
+
+4. Mở Command Prompt/Terminal trên máy tính và chạy:
+   
+   adb install -r "đường-dẫn-đến-file.apk"
+   
+   Ví dụ:
+   adb install -r C:\Users\ADMIN\Downloads\app-release.apk
+
+5. Nếu bị từ chối, thử:
+   adb install -r -d "đường-dẫn-đến-file.apk"
+
+───────────────────────────────────────────────────────────────
+CÁCH 3: CHO PHÉP CÀI ĐẶT TỪ NGUỒN KHÔNG XÁC ĐỊNH
+───────────────────────────────────────────────────────────────
+
+1. Vào Cài đặt → Bảo mật
+2. Tìm "Cài đặt từ nguồn không xác định" hoặc 
+   "Cho phép cài đặt ứng dụng không rõ nguồn gốc"
+3. Chọn ứng dụng bạn dùng để cài (File Manager, Chrome, v.v.)
+4. Bật quyền cho ứng dụng đó
+5. Cài đặt file APK của bạn
+
+───────────────────────────────────────────────────────────────
+CÁCH 4: CÀI ĐẶT QUA ANDROID STUDIO (CHO DEVELOPER)
+───────────────────────────────────────────────────────────────
+
+1. Mở Android Studio
+2. Kết nối điện thoại qua USB (đã bật USB Debugging)
+3. Chạy ứng dụng trực tiếp từ Android Studio:
+   - Click Run (Shift + F10)
+   - Chọn thiết bị của bạn
+   - Ứng dụng sẽ được cài đặt và chạy tự động
+
+───────────────────────────────────────────────────────────────
+CÁCH 5: BỎ QUA CẢNH BÁO VÀ CÀI TIẾP
+───────────────────────────────────────────────────────────────
+
+Khi gặp cảnh báo "Ứng dụng này có thể yêu cầu quyền truy cập 
+vào dữ liệu nhạy cảm":
+
+1. Nhấn "Chi tiết" hoặc "More info"
+2. Nhấn "Cài đặt anyway" hoặc "Cài đặt dù sao"
+3. Xác nhận lại lần nữa nếu được hỏi
+
+───────────────────────────────────────────────────────────────
+LƯU Ý QUAN TRỌNG:
+───────────────────────────────────────────────────────────────
+
+✓ Đây là ứng dụng của bạn, bạn có quyền cài đặt trên máy mình
+✓ Các quyền nhạy cảm là cần thiết cho chức năng của ứng dụng:
+  - Accessibility Service: Để tự động click
+  - Screen Capture: Để chụp màn hình và phân tích
+  - Overlay: Để hiển thị thông tin trên màn hình
+
+✓ Sau khi cài đặt, bạn cần:
+  1. Bật Accessibility Service trong Cài đặt → Trợ năng
+  2. Cấp quyền Overlay trong Cài đặt → Ứng dụng → AutobetLuki → 
+     Hiển thị trên các ứng dụng khác
+
+═══════════════════════════════════════════════════════════════
+
+

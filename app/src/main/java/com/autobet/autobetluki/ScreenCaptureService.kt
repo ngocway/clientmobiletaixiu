@@ -82,8 +82,8 @@ class ScreenCaptureService : Service() {
     @Volatile private var lastBettingButtonClickTime: Long = 0L // Timestamp when betting_button was successfully clicked
     @Volatile private var consecutiveUnknownCount: Int = 0 // Count consecutive HISTORY JSONs with win_loss="unknown"
     @Volatile private var consecutiveLossCount: Int = 0 // Count consecutive losses
-    @Volatile private var skipCount: Int = 0 // Number of rounds to skip (when consecutiveLossCount >= 4)
-    @Volatile private var consecutivePlaceBetSuccessCount: Int = 0 // Count consecutive successful "Đặt Cược" button clicks
+    @Volatile private var skipCount: Int = 0 // Number of rounds to skip (when consecutiveLossCount >= threshold)
+    @Volatile private var historyJsonCount: Int = 0 // Count HISTORY JSONs received (for clicking "Cược" button: click every 2nd JSON)
     private val client = OkHttpClient.Builder()
         .connectTimeout(30, TimeUnit.SECONDS)
         .readTimeout(60, TimeUnit.SECONDS)
@@ -143,7 +143,7 @@ class ScreenCaptureService : Service() {
                     consecutiveUnknownCount = 0
                     consecutiveLossCount = 0
                     skipCount = 0
-                    consecutivePlaceBetSuccessCount = 0
+                    historyJsonCount = 0
                     val mediaProjectionManager = getSystemService(Context.MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
                     mediaProjection = mediaProjectionManager.getMediaProjection(resultCode, data)
                     ensureServiceScope()
@@ -203,10 +203,10 @@ class ScreenCaptureService : Service() {
                 // - Waiting for server response
                 // - Matching templates
                 // - Clicking buttons (Cược, 1K, 10K, 50K, Đặt Cược)
-                // - Within 35 seconds after successfully clicking betting_button
+                // - Within 40 seconds after successfully clicking betting_button
                 val currentTime = System.currentTimeMillis()
                 val timeSinceBettingClick = currentTime - lastBettingButtonClickTime
-                val isWithinBettingCooldown = lastBettingButtonClickTime > 0 && timeSinceBettingClick < 35_000L
+                val isWithinBettingCooldown = lastBettingButtonClickTime > 0 && timeSinceBettingClick < 40_000L
                 
                 if (!isProcessingResponse.get() && !isWithinBettingCooldown) {
                     Log.d(TAG, "-------------------- New Capture Cycle --------------------")
@@ -217,11 +217,11 @@ class ScreenCaptureService : Service() {
                     if (isProcessingResponse.get()) {
                         Log.d(TAG, "Skipping capture - currently processing (waiting response/template matching/clicking buttons)")
                     } else if (isWithinBettingCooldown) {
-                        val remainingSeconds = (35_000L - timeSinceBettingClick) / 1000
-                        Log.d(TAG, "Skipping capture - within 35s cooldown after betting_button click (${remainingSeconds}s remaining)")
+                        val remainingSeconds = (40_000L - timeSinceBettingClick) / 1000
+                        Log.d(TAG, "Skipping capture - within 40s cooldown after betting_button click (${remainingSeconds}s remaining)")
                     }
                 }
-                delay(3_000L) // Capture every 3 seconds
+                delay(5_000L) // Capture every 5 seconds
             }
             Log.i(TAG, "Capture loop has ended.")
         }
@@ -591,6 +591,10 @@ class ScreenCaptureService : Service() {
                     AutoClickService.requestClick(5, 5)
                     delay(500) // Small delay for click to register
 
+                    // Increment HISTORY JSON counter (for clicking "Cược" button logic)
+                    historyJsonCount++
+                    Log.i(TAG, "Received HISTORY JSON #$historyJsonCount")
+
                     val winLossRaw = json.optString("win_loss", "")
                     val winLoss = winLossRaw.lowercase()
                     val returnValue = json.optDouble("return", 0.0)
@@ -640,15 +644,15 @@ class ScreenCaptureService : Service() {
                         if (processedWinLoss == "win") {
                             // Handle win
                             if (skipCount > 0) {
-                                // Currently skipping rounds - results in skipped rounds are IGNORED
-                                skipCount--
-                                Log.i(TAG, "WIN detected but SKIPPING (skip count remaining: $skipCount). Result is IGNORED - not counted, skip continues.")
-                                if (skipCount == 0) {
-                                    // Skip period completed - reset counter and start counting from scratch
-                                    Log.i(TAG, "Skip period completed. Resetting consecutive loss count from $consecutiveLossCount to 0. Will start counting from scratch.")
-                                    consecutiveLossCount = 0
-                                }
-                                isProcessingResponse.set(false)
+                                // Currently skipping, but win detected - cancel skip and reset
+                                skipCount = 0
+                                consecutiveLossCount = 0
+                                Log.i(TAG, "WIN detected while SKIPPING. Canceling skip, resetting counters. Will click normally.")
+                                // Perform normal clicks for win
+                                val betAmount = json.optDouble("bet_amount", 0.0)
+                                val clickCount = 1
+                                Log.i(TAG, "Processing JSON: win_loss='$processedWinLoss', bet_amount=$betAmount, clickCount=$clickCount")
+                                scheduleHistoryFollowUpClicks(clickCount)
                             } else {
                                 // Not skipping, reset counters on win
                                 if (consecutiveLossCount > 0) {
@@ -664,9 +668,9 @@ class ScreenCaptureService : Service() {
                         } else if (processedWinLoss == "loss") {
                             // Handle loss
                             if (skipCount > 0) {
-                                // Currently skipping rounds - results in skipped rounds are IGNORED
+                                // Currently skipping rounds - skip click for this JSON
                                 skipCount--
-                                Log.i(TAG, "LOSS detected but SKIPPING (skip count remaining: $skipCount). Result is IGNORED - not counted in consecutive loss count.")
+                                Log.i(TAG, "LOSS detected but SKIPPING (skip count remaining: $skipCount). No clicks will be performed for this JSON.")
                                 if (skipCount == 0) {
                                     // Skip period completed - reset counter and start counting from scratch
                                     Log.i(TAG, "Skip period completed. Resetting consecutive loss count from $consecutiveLossCount to 0. Will start counting from scratch.")
@@ -676,14 +680,17 @@ class ScreenCaptureService : Service() {
                             } else {
                                 // Not skipping, check if we need to start skipping
                                 consecutiveLossCount++
-                                Log.i(TAG, "LOSS detected. Consecutive loss count: $consecutiveLossCount/4")
+                                val prefs = getSharedPreferences("bet_config", Context.MODE_PRIVATE)
+                                val consecutiveLossThreshold = prefs.getInt("consecutiveLossThreshold", 5)
+                                Log.i(TAG, "LOSS detected. Consecutive loss count: $consecutiveLossCount/$consecutiveLossThreshold")
                                 
-                                if (consecutiveLossCount >= 4) {
-                                    // After 4 consecutive losses, skip next 3 rounds
-                                    // But this round (the 4th loss) still needs to click normally
-                                    skipCount = 3
-                                    Log.w(TAG, "!!! 4 CONSECUTIVE LOSSES DETECTED. Will skip next 3 rounds. Results in those 3 rounds will be IGNORED. Skip count set to $skipCount.")
-                                    // Still perform normal clicks for this 4th loss
+                                if (consecutiveLossCount >= consecutiveLossThreshold) {
+                                    // After N consecutive losses (configurable), skip next M rounds (configurable)
+                                    // This is the Nth loss, still click normally
+                                    val skipRoundsConfig = prefs.getInt("skipRoundsAfter5Losses", 0)
+                                    skipCount = skipRoundsConfig
+                                    Log.w(TAG, "!!! $consecutiveLossThreshold CONSECUTIVE LOSSES DETECTED. Will skip next $skipCount JSONs. Skip count set to $skipCount (from config).")
+                                    // Still perform normal clicks for this 5th loss
                                     val betAmount = json.optDouble("bet_amount", 0.0)
                                     val clickCount = ((betAmount * 2) / 1000.0).toInt().coerceAtLeast(0)
                                     Log.i(TAG, "Processing JSON: win_loss='$processedWinLoss', bet_amount=$betAmount, clickCount=$clickCount")
@@ -701,8 +708,9 @@ class ScreenCaptureService : Service() {
                         // Save current JSON after processing (only when return = 0)
                         saveHistoryJson(json)
                     } else {
-                        // return != 0: Use saved JSON to calculate clicks
-                        Log.i(TAG, "return=$returnValue (not 0). Using saved JSON to calculate clicks.")
+                        // return != 0: Use saved JSON (both bet_amount and win_loss) to calculate clicks
+                        // Do NOT use anything from current JSON, and do NOT save current JSON
+                        Log.i(TAG, "return=$returnValue (not 0). Using saved JSON (bet_amount and win_loss) to calculate clicks.")
                         val savedJson = loadLatestHistoryJson()
                         
                         if (savedJson == null) {
@@ -716,20 +724,20 @@ class ScreenCaptureService : Service() {
                         }
                         
                         val savedWinLoss = savedJson.optString("win_loss", "").lowercase()
-                        Log.i(TAG, "Using saved JSON with win_loss='$savedWinLoss'")
+                        val savedBetAmount = savedJson.optDouble("bet_amount", 0.0)
+                        Log.i(TAG, "Using saved JSON with win_loss='$savedWinLoss', bet_amount=$savedBetAmount")
                         
                         if (savedWinLoss == "win") {
                             // Handle win from saved JSON
                             if (skipCount > 0) {
-                                // Currently skipping rounds - results in skipped rounds are IGNORED
-                                skipCount--
-                                Log.i(TAG, "WIN detected (from saved JSON) but SKIPPING (skip count remaining: $skipCount). Result is IGNORED - not counted, skip continues.")
-                                if (skipCount == 0) {
-                                    // Skip period completed - reset counter and start counting from scratch
-                                    Log.i(TAG, "Skip period completed. Resetting consecutive loss count from $consecutiveLossCount to 0. Will start counting from scratch.")
-                                    consecutiveLossCount = 0
-                                }
-                                isProcessingResponse.set(false)
+                                // Currently skipping, but win detected - cancel skip and reset
+                                skipCount = 0
+                                consecutiveLossCount = 0
+                                Log.i(TAG, "WIN detected (from saved JSON) while SKIPPING. Canceling skip, resetting counters. Will click normally.")
+                                // Perform normal clicks for win
+                                val clickCount = 1
+                                Log.i(TAG, "Processing saved JSON: win_loss='$savedWinLoss', bet_amount=$savedBetAmount, clickCount=$clickCount")
+                                scheduleHistoryFollowUpClicks(clickCount)
                             } else {
                                 // Not skipping, reset counters on win
                                 if (consecutiveLossCount > 0) {
@@ -737,17 +745,16 @@ class ScreenCaptureService : Service() {
                                     consecutiveLossCount = 0
                                 }
                                 // Perform normal clicks for win
-                                val betAmount = savedJson.optDouble("bet_amount", 0.0)
                                 val clickCount = 1
-                                Log.i(TAG, "Processing saved JSON: win_loss='$savedWinLoss', bet_amount=$betAmount, clickCount=$clickCount")
+                                Log.i(TAG, "Processing saved JSON: win_loss='$savedWinLoss', bet_amount=$savedBetAmount, clickCount=$clickCount")
                                 scheduleHistoryFollowUpClicks(clickCount)
                             }
                         } else if (savedWinLoss == "loss") {
                             // Handle loss from saved JSON
                             if (skipCount > 0) {
-                                // Currently skipping rounds - results in skipped rounds are IGNORED
+                                // Currently skipping rounds - skip click for this JSON
                                 skipCount--
-                                Log.i(TAG, "LOSS detected (from saved JSON) but SKIPPING (skip count remaining: $skipCount). Result is IGNORED - not counted in consecutive loss count.")
+                                Log.i(TAG, "LOSS detected (from saved JSON) but SKIPPING (skip count remaining: $skipCount). No clicks will be performed for this JSON.")
                                 if (skipCount == 0) {
                                     // Skip period completed - reset counter and start counting from scratch
                                     Log.i(TAG, "Skip period completed. Resetting consecutive loss count from $consecutiveLossCount to 0. Will start counting from scratch.")
@@ -757,23 +764,24 @@ class ScreenCaptureService : Service() {
                             } else {
                                 // Not skipping, check if we need to start skipping
                                 consecutiveLossCount++
-                                Log.i(TAG, "LOSS detected (from saved JSON). Consecutive loss count: $consecutiveLossCount/4")
+                                val prefs = getSharedPreferences("bet_config", Context.MODE_PRIVATE)
+                                val consecutiveLossThreshold = prefs.getInt("consecutiveLossThreshold", 5)
+                                Log.i(TAG, "LOSS detected (from saved JSON). Consecutive loss count: $consecutiveLossCount/$consecutiveLossThreshold")
                                 
-                                if (consecutiveLossCount >= 4) {
-                                    // After 4 consecutive losses, skip next 3 rounds
-                                    // But this round (the 4th loss) still needs to click normally
-                                    skipCount = 3
-                                    Log.w(TAG, "!!! 4 CONSECUTIVE LOSSES DETECTED (from saved JSON). Will skip next 3 rounds. Results in those 3 rounds will be IGNORED. Skip count set to $skipCount.")
-                                    // Still perform normal clicks for this 4th loss
-                                    val betAmount = savedJson.optDouble("bet_amount", 0.0)
-                                    val clickCount = ((betAmount * 2) / 1000.0).toInt().coerceAtLeast(0)
-                                    Log.i(TAG, "Processing saved JSON: win_loss='$savedWinLoss', bet_amount=$betAmount, clickCount=$clickCount")
+                                if (consecutiveLossCount >= consecutiveLossThreshold) {
+                                    // After N consecutive losses (configurable), skip next M rounds (configurable)
+                                    // This is the Nth loss, still click normally
+                                    val skipRoundsConfig = prefs.getInt("skipRoundsAfter5Losses", 0)
+                                    skipCount = skipRoundsConfig
+                                    Log.w(TAG, "!!! $consecutiveLossThreshold CONSECUTIVE LOSSES DETECTED (from saved JSON). Will skip next $skipCount JSONs. Skip count set to $skipCount (from config).")
+                                    // Still perform normal clicks for this 5th loss
+                                    val clickCount = ((savedBetAmount * 2) / 1000.0).toInt().coerceAtLeast(0)
+                                    Log.i(TAG, "Processing saved JSON: win_loss='$savedWinLoss', bet_amount=$savedBetAmount, clickCount=$clickCount")
                                     scheduleHistoryFollowUpClicks(clickCount)
                                 } else {
                                     // Perform normal clicks for loss
-                                    val betAmount = savedJson.optDouble("bet_amount", 0.0)
-                                    val clickCount = ((betAmount * 2) / 1000.0).toInt().coerceAtLeast(0)
-                                    Log.i(TAG, "Processing saved JSON: win_loss='$savedWinLoss', bet_amount=$betAmount, clickCount=$clickCount")
+                                    val clickCount = ((savedBetAmount * 2) / 1000.0).toInt().coerceAtLeast(0)
+                                    Log.i(TAG, "Processing saved JSON: win_loss='$savedWinLoss', bet_amount=$savedBetAmount, clickCount=$clickCount")
                                     scheduleHistoryFollowUpClicks(clickCount)
                                 }
                             }
@@ -781,6 +789,9 @@ class ScreenCaptureService : Service() {
                             Log.w(TAG, "Saved JSON win_loss '$savedWinLoss' not actionable; skipping follow-up clicks.")
                             isProcessingResponse.set(false)
                         }
+                        
+                        // Do NOT save current JSON when return != 0
+                        // Only save when return = 0 (which represents the actual bet decision)
                     }
                 }
                 else -> {
@@ -804,23 +815,10 @@ class ScreenCaptureService : Service() {
                 }
                 
                 val prefs = getSharedPreferences("bet_config", Context.MODE_PRIVATE)
-                val buttonBetX = prefs.getInt("button_bet_x", -1)
-                val buttonBetY = prefs.getInt("button_bet_y", -1)
                 
-                // Click "Cược" button if 20 consecutive successful "Đặt Cược" clicks
-                val shouldClickBetButton = consecutivePlaceBetSuccessCount >= 20
-                
-                if (shouldClickBetButton && buttonBetX >= 0 && buttonBetY >= 0) {
-                    // Step 1: Click "Cược" button (button_bet_coords)
-                    Log.i(TAG, "Step 1: Clicking 'Cược' button at ($buttonBetX, $buttonBetY) - triggered by 20 consecutive successful 'Đặt Cược' clicks")
-                    showClickOverlay(buttonBetX, buttonBetY)
-                    AutoClickService.requestClick(buttonBetX, buttonBetY)
-                    delay(100L) // Wait for UI to update
-                    
-                    // Reset counter after clicking "Cược" button
-                    consecutivePlaceBetSuccessCount = 0
-                    Log.i(TAG, "Reset consecutive 'Đặt Cược' success count to 0 after clicking 'Cược' button.")
-                }
+                // Click "Cược" button every 2nd HISTORY JSON (JSON 2, 4, 6, 8, ...)
+                // historyJsonCount: 1 (no click), 2 (click), 3 (no click), 4 (click), ...
+                val shouldClickBetButton = historyJsonCount % 2 == 0
                 
                 // If clickCount >= 7, use stored button coordinates instead of template matching
                 if (clickCount >= 7) {
@@ -853,6 +851,20 @@ class ScreenCaptureService : Service() {
                                 
                                 // Show click information overlay
                                 showClickInfoOverlay(clickCount, clicks50k, clicks10k, clicks1k)
+                                
+                                // Step 1: Click "Cược" button every 2nd HISTORY JSON (after calculating click count)
+                                val buttonBetX = prefs.getInt("button_bet_x", -1)
+                                val buttonBetY = prefs.getInt("button_bet_y", -1)
+                                if (shouldClickBetButton && buttonBetX >= 0 && buttonBetY >= 0) {
+                                    Log.i(TAG, "Step 1: Clicking 'Cược' button at ($buttonBetX, $buttonBetY) - triggered by HISTORY JSON #$historyJsonCount (every 2nd JSON)")
+                                    showClickOverlay(buttonBetX, buttonBetY)
+                                    AutoClickService.requestClick(buttonBetX, buttonBetY)
+                                    delay(100L) // Wait for UI to update
+                                    
+                                    // Reset counter after clicking "Cược" button
+                                    historyJsonCount = 0
+                                    Log.i(TAG, "Reset historyJsonCount to 0 after clicking 'Cược' button.")
+                                }
                                 
                                 // Step 2: Click 50K button the calculated number of times
                                 if (clicks50k > 0) {
@@ -903,6 +915,20 @@ class ScreenCaptureService : Service() {
                                 // Fallback to template matching if 50K coordinates not available
                                 Log.w(TAG, "50K button coordinates not available. Falling back to template matching.")
                                 
+                                // Step 1: Click "Cược" button every 2nd HISTORY JSON (after calculating click count)
+                                val buttonBetX = prefs.getInt("button_bet_x", -1)
+                                val buttonBetY = prefs.getInt("button_bet_y", -1)
+                                if (shouldClickBetButton && buttonBetX >= 0 && buttonBetY >= 0) {
+                                    Log.i(TAG, "Step 1: Clicking 'Cược' button at ($buttonBetX, $buttonBetY) - triggered by HISTORY JSON #$historyJsonCount (every 2nd JSON)")
+                                    showClickOverlay(buttonBetX, buttonBetY)
+                                    AutoClickService.requestClick(buttonBetX, buttonBetY)
+                                    delay(100L) // Wait for UI to update
+                                    
+                                    // Reset counter after clicking "Cược" button
+                                    historyJsonCount = 0
+                                    Log.i(TAG, "Reset historyJsonCount to 0 after clicking 'Cược' button.")
+                                }
+                                
                                 // Find and click one.jpg
                                 val screenBitmap = captureSingleBitmap()
                                 val oneLocation = screenBitmap?.let { findTemplateLocation(it, "one") }
@@ -945,6 +971,20 @@ class ScreenCaptureService : Service() {
                                 // Show click information overlay
                                 showClickInfoOverlay(clickCount, 0, clicks10k, clicks1k)
                                 
+                                // Step 1: Click "Cược" button every 2nd HISTORY JSON (after calculating click count)
+                                val buttonBetX = prefs.getInt("button_bet_x", -1)
+                                val buttonBetY = prefs.getInt("button_bet_y", -1)
+                                if (shouldClickBetButton && buttonBetX >= 0 && buttonBetY >= 0) {
+                                    Log.i(TAG, "Step 1: Clicking 'Cược' button at ($buttonBetX, $buttonBetY) - triggered by HISTORY JSON #$historyJsonCount (every 2nd JSON)")
+                                    showClickOverlay(buttonBetX, buttonBetY)
+                                    AutoClickService.requestClick(buttonBetX, buttonBetY)
+                                    delay(100L) // Wait for UI to update
+                                    
+                                    // Reset counter after clicking "Cược" button
+                                    historyJsonCount = 0
+                                    Log.i(TAG, "Reset historyJsonCount to 0 after clicking 'Cược' button.")
+                                }
+                                
                                 // Step 2: Click 10K button the calculated number of times
                                 if (clicks10k > 0) {
                                     Log.i(TAG, "Step 2: Clicking 10K button $clicks10k time(s) at ($button10kX, $button10kY)")
@@ -980,6 +1020,20 @@ class ScreenCaptureService : Service() {
                                 // Fallback to template matching if coordinates not available
                                 Log.w(TAG, "Stored button coordinates not available. Falling back to template matching.")
                                 
+                                // Step 1: Click "Cược" button every 2nd HISTORY JSON (after calculating click count)
+                                val buttonBetX = prefs.getInt("button_bet_x", -1)
+                                val buttonBetY = prefs.getInt("button_bet_y", -1)
+                                if (shouldClickBetButton && buttonBetX >= 0 && buttonBetY >= 0) {
+                                    Log.i(TAG, "Step 1: Clicking 'Cược' button at ($buttonBetX, $buttonBetY) - triggered by HISTORY JSON #$historyJsonCount (every 2nd JSON)")
+                                    showClickOverlay(buttonBetX, buttonBetY)
+                                    AutoClickService.requestClick(buttonBetX, buttonBetY)
+                                    delay(100L) // Wait for UI to update
+                                    
+                                    // Reset counter after clicking "Cược" button
+                                    historyJsonCount = 0
+                                    Log.i(TAG, "Reset historyJsonCount to 0 after clicking 'Cược' button.")
+                                }
+                                
                                 // Find and click one.jpg
                                 val screenBitmap = captureSingleBitmap()
                                 val oneLocation = screenBitmap?.let { findTemplateLocation(it, "one") }
@@ -1014,6 +1068,20 @@ class ScreenCaptureService : Service() {
                         
                         // Show click information overlay
                         showClickInfoOverlay(clickCount, 0, 0, clickCount)
+                        
+                        // Step 1: Click "Cược" button every 2nd HISTORY JSON (after calculating click count)
+                        val buttonBetX = prefs.getInt("button_bet_x", -1)
+                        val buttonBetY = prefs.getInt("button_bet_y", -1)
+                        if (shouldClickBetButton && buttonBetX >= 0 && buttonBetY >= 0) {
+                            Log.i(TAG, "Step 1: Clicking 'Cược' button at ($buttonBetX, $buttonBetY) - triggered by HISTORY JSON #$historyJsonCount (every 2nd JSON)")
+                            showClickOverlay(buttonBetX, buttonBetY)
+                            AutoClickService.requestClick(buttonBetX, buttonBetY)
+                            delay(100L) // Wait for UI to update
+                            
+                            // Reset counter after clicking "Cược" button
+                            historyJsonCount = 0
+                            Log.i(TAG, "Reset historyJsonCount to 0 after clicking 'Cược' button.")
+                        }
                         
                         delay(500L) // Delay 0.5 seconds before clicking 1K button
                         
@@ -1099,16 +1167,11 @@ class ScreenCaptureService : Service() {
             AutoClickService.requestClick(buttonPlaceBetX, buttonPlaceBetY)
             delay(50L) // Small delay for click to register
             
-            // Record successful betting_button click time for 35-second cooldown
+            // Record successful betting_button click time for 40-second cooldown
             lastBettingButtonClickTime = System.currentTimeMillis()
-            
-            // Increment consecutive successful "Đặt Cược" clicks
-            consecutivePlaceBetSuccessCount++
-            Log.i(TAG, "betting_button clicked successfully. Consecutive success count: $consecutivePlaceBetSuccessCount/20. Starting 35-second cooldown period.")
+            Log.i(TAG, "betting_button clicked successfully. Starting 40-second cooldown period.")
         } else {
-            // Reset counter if coordinates not found (click failed)
-            consecutivePlaceBetSuccessCount = 0
-            Log.w(TAG, "'Đặt Cược' button coordinates not found in SharedPreferences. Cannot click 'Đặt Cược'. Resetting consecutive success count to 0.")
+            Log.w(TAG, "'Đặt Cược' button coordinates not found in SharedPreferences. Cannot click 'Đặt Cược'.")
             Log.w(TAG, "Please ensure JSON Betting with button_place_bet_coords has been received and saved.")
         }
     }

@@ -157,6 +157,16 @@ fun ConfigScreen(
         )
     }
     
+    // Initialize skip rounds: use saved value or default to 0
+    var skipRounds by remember {
+        mutableStateOf(sharedPref.getInt("skipRoundsAfter5Losses", 0))
+    }
+    
+    // Initialize consecutive loss threshold: use saved value or default to 5
+    var consecutiveLossThreshold by remember {
+        mutableStateOf(sharedPref.getInt("consecutiveLossThreshold", 5))
+    }
+    
     // Save ANDROID_ID as default device name on first install if not already set
     LaunchedEffect(Unit) {
         val savedDeviceName = sharedPref.getString("deviceName", "")?.trim()
@@ -225,23 +235,147 @@ fun ConfigScreen(
                 label = { Text("Device name") },
                 modifier = Modifier.fillMaxWidth()
             )
-
-            Button(
-                onClick = {
-                    Log.d(logTag, "Save button pressed")
-                    with(sharedPref.edit()) {
-                        putString("deviceName", deviceName)
-                        apply()
-                    }
-                    Toast.makeText(context, "Đã lưu cấu hình", Toast.LENGTH_SHORT).show()
-                    Log.d(logTag, "Configuration saved to SharedPreferences")
-                },
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .height(56.dp)
-                    .padding(top = 16.dp)
+            
+            Text(
+                "Số ván thua liên tiếp để bắt đầu skip",
+                style = MaterialTheme.typography.bodyMedium,
+                modifier = Modifier.fillMaxWidth()
+            )
+            
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(12.dp),
+                verticalAlignment = Alignment.CenterVertically
             ) {
-                Text("Save")
+                // Decrease button
+                Button(
+                    onClick = {
+                        if (consecutiveLossThreshold > 1) {
+                            consecutiveLossThreshold--
+                        }
+                    },
+                    modifier = Modifier
+                        .width(56.dp)
+                        .height(56.dp),
+                    enabled = consecutiveLossThreshold > 1
+                ) {
+                    Text("-", style = MaterialTheme.typography.headlineMedium)
+                }
+                
+                // Display current value
+                Card(
+                    modifier = Modifier
+                        .weight(1f)
+                        .height(56.dp),
+                    colors = CardDefaults.cardColors(
+                        containerColor = MaterialTheme.colorScheme.surfaceVariant
+                    )
+                ) {
+                    Box(
+                        modifier = Modifier.fillMaxSize(),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Text(
+                            text = consecutiveLossThreshold.toString(),
+                            style = MaterialTheme.typography.headlineMedium
+                        )
+                    }
+                }
+                
+                // Increase button
+                Button(
+                    onClick = {
+                        if (consecutiveLossThreshold < 20) {
+                            consecutiveLossThreshold++
+                        }
+                    },
+                    modifier = Modifier
+                        .width(56.dp)
+                        .height(56.dp),
+                    enabled = consecutiveLossThreshold < 20
+                ) {
+                    Text("+", style = MaterialTheme.typography.headlineMedium)
+                }
+            }
+            
+            Text(
+                "Số ván skip sau $consecutiveLossThreshold thua liên tiếp",
+                style = MaterialTheme.typography.bodyMedium,
+                modifier = Modifier.fillMaxWidth()
+            )
+            
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(12.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                // Decrease button
+                Button(
+                    onClick = {
+                        if (skipRounds > 0) {
+                            skipRounds--
+                        }
+                    },
+                    modifier = Modifier
+                        .width(56.dp)
+                        .height(56.dp),
+                    enabled = skipRounds > 0
+                ) {
+                    Text("-", style = MaterialTheme.typography.headlineMedium)
+                }
+                
+                // Display current value
+                Card(
+                    modifier = Modifier
+                        .weight(1f)
+                        .height(56.dp),
+                    colors = CardDefaults.cardColors(
+                        containerColor = MaterialTheme.colorScheme.surfaceVariant
+                    )
+                ) {
+                    Box(
+                        modifier = Modifier.fillMaxSize(),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Text(
+                            text = skipRounds.toString(),
+                            style = MaterialTheme.typography.headlineMedium
+                        )
+                    }
+                }
+                
+                // Increase button
+                Button(
+                    onClick = {
+                        if (skipRounds < 5) {
+                            skipRounds++
+                        }
+                    },
+                    modifier = Modifier
+                        .width(56.dp)
+                        .height(56.dp),
+                    enabled = skipRounds < 5
+                ) {
+                    Text("+", style = MaterialTheme.typography.headlineMedium)
+                }
+                
+                // Save button
+                Button(
+                    onClick = {
+                        Log.d(logTag, "Save button pressed: consecutiveLossThreshold=$consecutiveLossThreshold, skipRounds=$skipRounds, deviceName=$deviceName")
+                        with(sharedPref.edit()) {
+                            putString("deviceName", deviceName)
+                            putInt("consecutiveLossThreshold", consecutiveLossThreshold)
+                            putInt("skipRoundsAfter5Losses", skipRounds)
+                            apply()
+                        }
+                        Toast.makeText(context, "Đã lưu cấu hình (Bắt đầu skip sau $consecutiveLossThreshold thua, Skip: $skipRounds ván)", Toast.LENGTH_SHORT).show()
+                        Log.d(logTag, "Configuration saved to SharedPreferences: deviceName=$deviceName, consecutiveLossThreshold=$consecutiveLossThreshold, skipRoundsAfter5Losses=$skipRounds")
+                    },
+                    modifier = Modifier.height(56.dp)
+                ) {
+                    Text("Save")
+                }
             }
         }
     }

@@ -591,6 +591,11 @@ class ScreenCaptureService : Service() {
                     AutoClickService.requestClick(5, 5)
                     delay(500) // Small delay for click to register
 
+                    // Log full JSON response
+                    Log.i(TAG, "=== FULL HISTORY JSON RESPONSE ===")
+                    Log.i(TAG, responseBody)
+                    Log.i(TAG, "=== END FULL HISTORY JSON RESPONSE ===")
+
                     // Increment HISTORY JSON counter (for clicking "Cược" button logic)
                     historyJsonCount++
                     Log.i(TAG, "Received HISTORY JSON #$historyJsonCount")
